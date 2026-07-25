@@ -1,20 +1,59 @@
 name: Firmware Build Runner
-# 真实交叉编译：认领线上排队的 build_jobs，用 arm-none-eabi-gcc 编译并回写
+
+# 固件真实交叉编译：认领线上排队的 build_jobs，用 arm-none-eabi-gcc 编译并回写结果。
+#
+# 需要两个 Secrets 才会实际运行（Settings → Secrets and variables → Actions）：
+#   APP_BASE_URL     例如 https://nuedc-agent.vercel.app
+#   ADMIN_API_KEY    与线上环境变量一致
+# 未配置时本 workflow 会跳过而非失败 —— 避免定时任务反复报错刷屏、消耗额度。
+
 on:
   workflow_dispatch:
   schedule:
+    # 每 30 分钟巡一次编译队列
     - cron: "*/30 * * * *"
+
+concurrency:
+  group: firmware-build
+  cancel-in-progress: false
+
 jobs:
-  build:
+  check:
+    name: 检查是否已配置
     runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.probe.outputs.configured }}
+    steps:
+      - id: probe
+        env:
+          APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+        run: |
+          if [ -n "$APP_BASE_URL" ] && [ -n "$ADMIN_API_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Secrets 已配置，将执行固件编译"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::未配置 APP_BASE_URL / ADMIN_API_KEY，跳过固件编译。"
+            echo "如需启用：Settings → Secrets and variables → Actions 添加这两个 Secret。"
+          fi
+
+  build:
+    name: 编译排队中的固件任务
+    needs: check
+    if: needs.check.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: npm }
-      - run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
-      - run: npm ci
-      - run: npm run build:runner
+      - name: 安装 ARM 交叉编译工具链
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+      - run: npm ci || npm install
+      - name: 认领并编译
         env:
           BASE_URL: ${{ secrets.APP_BASE_URL }}
           ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
           RUNNER_NAME: github-actions
+        run: npm run build:runner

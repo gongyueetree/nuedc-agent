@@ -118,3 +118,23 @@ describe("数据库驱动选择（CI 与自建部署）", () => {
     expect(fs.readFileSync("app/api/ready/route.ts", "utf8")).toContain("db_driver");
   });
 });
+
+describe("固件编译 workflow 的可选性", () => {
+  it("未配置 Secrets 时跳过而非失败（避免定时任务反复报错）", async () => {
+    const fs = await import("node:fs");
+    const wf = fs.readFileSync(".github/workflows/build-firmware.yml", "utf8");
+    // 先探测再决定是否执行
+    expect(wf).toContain("needs.check.outputs.configured == 'true'");
+    expect(wf).toContain("::notice::");
+    expect(wf).not.toContain("exit 1");
+  });
+
+  it("build-runner 缺少 ADMIN_API_KEY 时以 0 退出", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/build-runner.mts", "utf8");
+    const guard = src.slice(src.indexOf("const KEY ="), src.indexOf("const H ="));
+    expect(guard).toContain("process.exit(0)");
+    expect(guard).not.toContain("process.exit(1)");
+    expect(guard).toContain("跳过固件编译");
+  });
+})

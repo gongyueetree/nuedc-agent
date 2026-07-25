@@ -14,7 +14,12 @@ import { validateBuildFiles } from "../lib/build-limits";
 
 const BASE = process.env.BASE_URL || "http://localhost:3000";
 const KEY = process.env.ADMIN_API_KEY || "";
-if (!KEY) { console.error("需要 ADMIN_API_KEY"); process.exit(1); }
+if (!KEY) {
+  // 未配置视为「未启用固件编译」而非错误：定时任务不应因此反复失败
+  console.log("未配置 ADMIN_API_KEY，跳过固件编译。");
+  console.log("如需启用：设置 BASE_URL 与 ADMIN_API_KEY 环境变量（CI 中为 GitHub Secrets）。");
+  process.exit(0);
+}
 const H = { "content-type": "application/json", "X-Api-Key": KEY };
 
 const TARGET_FLAGS: Record<string, { cc: string; flags: string[] }> = {
