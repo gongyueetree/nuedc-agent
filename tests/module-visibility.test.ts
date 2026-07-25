@@ -122,3 +122,69 @@ describe("module-search 可见性判断（内存层，与 SQL 层双保险）", 
     expect(visibleTo({ scope: "PERSONAL", owner_ref: "ezplm:u1" }, { viewerRef: "ezplm:u2" })).toBe(false);
   });
 });
+
+describe("阶段 C：本组织模块优先", () => {
+  const mods = [
+    { id: "pub-good", name: "公共高认证模块", scope: "PUBLIC", category: "mcu.arm",
+      certification_status: "COMPETITION_READY", interfaces: [], power: {} },
+    { id: "org-plain", name: "组织普通模块", scope: "ORGANIZATION", org_ref: "ezplm:ws-aaa",
+      category: "mcu.arm", certification_status: "DRAFT", interfaces: [], power: {} },
+  ];
+
+  it("功能等价时本组织模块排在公共模块之前，理由含「本组织模块」", async () => {
+    const { searchModules } = await import("../lib/module-search");
+    const { picked } = searchModules(mods, { orgRef: "ezplm:ws-aaa" });
+    expect(picked[0].module.id).toBe("org-plain");
+    expect(picked[0].reasons).toContain("本组织模块");
+  });
+
+  it("非本组织成员看不到该模块，公共模块回到首位", async () => {
+    const { searchModules } = await import("../lib/module-search");
+    const { picked } = searchModules(mods, { orgRef: "ezplm:ws-bbb" });
+    expect(picked.map((p) => p.module.id)).not.toContain("org-plain");
+    expect(picked[0].module.id).toBe("pub-good");
+  });
+
+  it("组织库模块很多时仍保证公共模块保底数量", async () => {
+    const { searchModules, PUBLIC_FLOOR } = await import("../lib/module-search");
+    const many = [
+      ...Array.from({ length: 30 }, (_, i) => ({
+        id: `org${i}`, name: `组织模块${i}`, scope: "ORGANIZATION", org_ref: "ezplm:ws-aaa",
+        category: "other.misc", certification_status: "DOCUMENTED", interfaces: [], power: {},
+      })),
+      ...Array.from({ length: 10 }, (_, i) => ({
+        id: `pub${i}`, name: `公共模块${i}`, scope: "PUBLIC",
+        category: "other.misc", certification_status: "DOCUMENTED", interfaces: [], power: {},
+      })),
+    ];
+    const { picked } = searchModules(many, { orgRef: "ezplm:ws-aaa", topK: 20 });
+    const pubCount = picked.filter((p) => p.module.scope === "PUBLIC").length;
+    expect(pubCount).toBeGreaterThanOrEqual(Math.min(PUBLIC_FLOOR, 10));
+  });
+
+  it("目录文本标注归属，LLM 能识别哪些是本组织模块", async () => {
+    const { buildModuleContext } = await import("../lib/module-search");
+    const { text } = buildModuleContext(mods, { orgRef: "ezplm:ws-aaa" });
+    expect(text).toContain("【本组织】");
+  });
+
+  it("Agent 不再从 input 读可见范围（客户端可伪造）", async () => {
+    const fs = await import("node:fs");
+    const eng = fs.readFileSync("lib/agents/engineering.ts", "utf8");
+    const plan = fs.readFileSync("lib/agents/planning.ts", "utf8");
+    // 只允许出现在注释里
+    expect(eng).not.toMatch(/viewerRef:\s*input\./);
+    expect(eng).not.toMatch(/orgRef:\s*input\./);
+    expect(eng).toContain("currentAgentContext()");
+    expect(plan).toContain("currentAgentContext()");
+  });
+
+  it("两个 Agent 的提示词都要求本组织模块优先", async () => {
+    const fs = await import("node:fs");
+    for (const f of ["lib/agents/planning.ts", "lib/agents/engineering.ts"]) {
+      const src = fs.readFileSync(f, "utf8");
+      expect(src, `${f} 缺少本组织优先规则`).toContain("模块选用硬规则");
+      expect(src).toContain("必须优先选用");
+    }
+  });
+});
