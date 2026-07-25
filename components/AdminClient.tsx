@@ -154,6 +154,53 @@ export default function AdminClient() {
 
 /* ============ 分区表单编辑器 ============ */
 function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview }: any) {
+
+  /** 上传图片：浏览器端压缩到合理尺寸后存为 data URL。
+   *  这样图片随模块数据一起保存，不需要外部图床，也不会遇到淘宝那类站点的防盗链。 */
+  async function uploadImages(files: FileList | null) {
+    if (!files?.length) return;
+    const MAX_EDGE = 800;          // 长边上限，够看清模块细节
+    const MAX_BYTES = 400 * 1024;  // 单张上限，避免撑爆数据库行
+    const out: string[] = [];
+
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith("image/")) continue;
+      try {
+        const dataUrl = await new Promise<string>((res, rej) => {
+          const r = new FileReader();
+          r.onload = () => res(String(r.result));
+          r.onerror = () => rej(new Error("读取失败"));
+          r.readAsDataURL(file);
+        });
+        const img = await new Promise<HTMLImageElement>((res, rej) => {
+          const i = new Image();
+          i.onload = () => res(i);
+          i.onerror = () => rej(new Error("解码失败"));
+          i.src = dataUrl;
+        });
+        const scale = Math.min(1, MAX_EDGE / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d")?.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // 逐步降质直到满足体积上限
+        let quality = 0.85;
+        let encoded = canvas.toDataURL("image/jpeg", quality);
+        while (encoded.length * 0.75 > MAX_BYTES && quality > 0.4) {
+          quality -= 0.15;
+          encoded = canvas.toDataURL("image/jpeg", quality);
+        }
+        out.push(encoded);
+      } catch {
+        console.warn(`图片 ${file.name} 处理失败`);
+      }
+    }
+    if (out.length) {
+      setDraft((d: any) => ({ ...d, images: [...(d.images || []), ...out] }));
+    }
+  }
+
   const set = (k: string, v: any) => setDraft({ ...draft, [k]: v });
   const setNested = (obj: string, k: string, v: any) => setDraft({ ...draft, [obj]: { ...(draft[obj] || {}), [k]: v } });
   const lines = (arr?: string[]) => (arr || []).join("\n");
@@ -202,9 +249,17 @@ function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview }: any) {
             onChange={(e) => set("tags", e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} /></F>
         </div>
         <F label="描述"><textarea value={draft.description || ""} onChange={(e) => set("description", e.target.value)} style={{ minHeight: 56 }} /></F>
-        <F label="图片（每行一个 URL）">
+        <F label="图片">
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <label className="btn sm" style={{ display: "inline-block", cursor: "pointer" }}>
+              📷 上传图片
+              <input type="file" accept="image/*" multiple hidden
+                onChange={(e) => uploadImages(e.target.files)} />
+            </label>
+            <span className="hint">支持多选 · 自动压缩后随模块保存，无需图床</span>
+          </div>
           <textarea value={lines(draft.images)} onChange={(e) => set("images", parseLines(e.target.value))}
-            placeholder="https://…/module.jpg&#10;支持多张，每行一个" style={{ minHeight: 36 }} />
+            placeholder="也可直接粘贴图片 URL，每行一个" style={{ minHeight: 36, marginTop: 6 }} />
         </F>
         {(draft.images || []).length > 0 && (
           <div className="module-gallery" style={{ marginTop: -6 }}>

@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { PREP_TASKS, KNOWLEDGE_POINTS, TYPICAL_DIRECTIONS, FEATURES, COMPETITION_DATE, COMPETITION_NAME } from "../data/prep-content";
+import { TYPICAL_DIRECTIONS, FEATURES, COMPETITION_DATE, COMPETITION_NAME } from "../data/prep-content";
 import { CATEGORY_TREE, CAT_ICON, categoryLabel } from "../data/categories";
 import { STAGES, STAGE_LABEL } from "./Platform";
 
@@ -32,9 +32,7 @@ export function ModuleThumb({ m, size }: { m: any; size?: number }) {
 
 /* ================= 首页 ================= */
 export function HomePage({ ctx }: { ctx: any }) {
-  const [done, setDone] = useState<boolean[]>(PREP_TASKS.map(() => false));
   const [detail, setDetail] = useState<any>(null);
-  const doneN = done.filter(Boolean).length;
   const hot = useMemo(
     () => [...ctx.modules].sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || (b.price || 0) - (a.price || 0)).slice(0, 5),
     [ctx.modules]
@@ -65,7 +63,7 @@ export function HomePage({ ctx }: { ctx: any }) {
       <Dashboard ctx={ctx} />
       <AccountCard />
 
-      <div className="grid" style={{ gridTemplateColumns: "1fr 300px", alignItems: "start" }}>
+      <div className="grid" style={{ gridTemplateColumns: "1fr", alignItems: "start" }}>
         <div style={{ display: "grid", gap: 14 }}>
           <div className="card">
             <h3>热门模块推荐 <span className="more" onClick={() => ctx.setPage("modules")}>更多模块 →</span></h3>
@@ -100,28 +98,6 @@ export function HomePage({ ctx }: { ctx: any }) {
           </div>
         </div>
 
-        <div style={{ display: "grid", gap: 14 }}>
-          <div className="card">
-            <h3>今日备赛任务 <span className="hint" style={{ fontWeight: 400 }}>{doneN}/{PREP_TASKS.length}</span></h3>
-            <div className="progress"><i style={{ width: `${(doneN / PREP_TASKS.length) * 100}%` }} /></div>
-            <div className="tasklist">
-              {PREP_TASKS.map((t, i) => (
-                <label key={t} className={done[i] ? "done" : ""}>
-                  <input type="checkbox" checked={done[i]} onChange={() => setDone((d) => d.map((v, j) => (j === i ? !v : v)))} />
-                  {t}
-                </label>
-              ))}
-            </div>
-          </div>
-          <div className="card">
-            <h3>热门知识点</h3>
-            <div className="klist">
-              {KNOWLEDGE_POINTS.map((k) => (
-                <div key={k.t} className="krow">{k.t}<span className="heat">{k.heat}</span></div>
-              ))}
-            </div>
-          </div>
-        </div>
       </div>
 
       {detail && <ModuleDetailModal detail={detail} onClose={() => setDetail(null)}

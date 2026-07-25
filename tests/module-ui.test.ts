@@ -239,7 +239,7 @@ describe("后台图片字段的可发现性", () => {
     const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
     const basicStart = src.indexOf("<h4>基本信息</h4>");
     const basicEnd = src.indexOf("<h4>接口定义", basicStart);
-    const imageField = src.indexOf('图片（每行一个 URL）');
+    const imageField = src.indexOf('<F label="图片">');
     expect(basicStart).toBeGreaterThan(-1);
     expect(imageField).toBeGreaterThan(basicStart);
     expect(imageField, "图片字段应在基本信息区内，否则用户看不到").toBeLessThan(basicEnd);
@@ -281,5 +281,41 @@ describe("模块图片批量管理", () => {
     const fs = await import("node:fs");
     const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
     expect(pkg.scripts["module-images"]).toBeTruthy();
+  });
+});
+
+describe("首页板块与上传功能（防回归）", () => {
+  it("首页不再包含「今日备赛任务」与「热门知识点」", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-core.tsx", "utf8");
+    expect(src).not.toContain("今日备赛任务");
+    expect(src).not.toContain("热门知识点");
+    expect(src).not.toContain("PREP_TASKS");
+    expect(src).not.toContain("KNOWLEDGE_POINTS");
+  });
+
+  it("后台提供图片上传（而不只是填 URL）", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    expect(src).toContain('type="file"');
+    expect(src).toContain("accept=\"image/*\"");
+    expect(src).toContain("uploadImages");
+    expect(src).toContain("上传图片");
+  });
+
+  it("上传的图片在浏览器端压缩，避免撑爆数据库", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    expect(src).toContain("MAX_EDGE");
+    expect(src).toContain("MAX_BYTES");
+    expect(src).toContain("toDataURL");
+    expect(src).toMatch(/quality\s*-=/);      // 超限时降质重编码
+  });
+
+  it("缩略图不使用会塌陷的 aspect-ratio + height:auto 组合", async () => {
+    const fs = await import("node:fs");
+    const css = fs.readFileSync("app/globals.css", "utf8");
+    expect(css).toMatch(/\.mod-card \.thumb \{[\s\S]{0,120}height:\s*74px/);
+    expect(css).not.toMatch(/\.mod-card \.thumb \{ aspect-ratio: 1 \/ 1; height: auto/);
   });
 });
