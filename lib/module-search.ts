@@ -8,6 +8,15 @@ import { estimateTokens } from "./model-gateway/context-builder";
 export const MODULE_SCOPES = ["PERSONAL", "TEAM", "ORGANIZATION", "PUBLIC"] as const;
 export type ModuleScope = (typeof MODULE_SCOPES)[number];
 
+/** 归属加权（契约固定值）：功能等价时本组织模块必须排在公共模块之前 */
+export const SCOPE_BONUS: Record<string, number> = {
+  PERSONAL: 120, TEAM: 110, ORGANIZATION: 100, PUBLIC: 0,
+};
+
+/** 公共模块保底数量：组织库只有两三个模块时不能把候选集饿死，
+ *  否则方案生成会因为可选器件太少而质量下降 */
+export const PUBLIC_FLOOR = 5;
+
 const CERT_RANK: Record<string, number> = {
   COMPETITION_READY: 0, BENCHMARKED: 1, FUNCTION_TESTED: 2,
   POWER_TESTED: 3, DOCUMENTED: 4, DRAFT: 5, DEPRECATED: 9,
@@ -88,6 +97,14 @@ export function searchModules(all: any[], opts: SearchOptions = {}): { picked: S
 
     if (preferred.has(m.id)) { score += 100; reasons.push("用户已选用"); }
 
+    const scope = String(m.scope || "PUBLIC");
+    const bonus = SCOPE_BONUS[scope] ?? 0;
+    if (bonus > 0) {
+      score += bonus;
+      // 理由文案固定，前端与 LLM prompt 都依赖它
+      reasons.push(scope === "ORGANIZATION" ? "本组织模块" : "我的模块");
+    }
+
     const cert = CERT_RANK[String(m.certification_status)] ?? 6;
     const certPts = (7 - cert) * 4;
     score += certPts;
@@ -119,7 +136,33 @@ export function searchModules(all: any[], opts: SearchOptions = {}): { picked: S
   });
 
   scored.sort((a, b) => b.score - a.score);
+
+  // 先按分数取 topK，再检查公共模块是否够数；不够就用高分公共模块替换末位私有模块
   const picked = scored.slice(0, topK);
+  const isPublic = (x: ScoredModule) => String(x.module.scope || "PUBLIC") === "PUBLIC";
+  const publicPool = scored.filter(isPublic);
+  const floor = Math.min(PUBLIC_FLOOR, publicPool.length);
+  let publicInPicked = picked.filter(isPublic).length;
+
+  if (publicInPicked < floor) {
+    const pickedIds = new Set(picked.map((p) => p.module.id));
+    for (const cand of publicPool) {
+      if (publicInPicked >= floor) break;
+      if (pickedIds.has(cand.module.id)) continue;
+      // 从末位开始替换非公共模块
+      for (let i = picked.length - 1; i >= 0; i--) {
+        if (!isPublic(picked[i])) {
+          pickedIds.delete(picked[i].module.id);
+          picked[i] = cand;
+          pickedIds.add(cand.module.id);
+          publicInPicked++;
+          break;
+        }
+      }
+    }
+    picked.sort((a, b) => b.score - a.score);
+  }
+
   return { picked, filteredOut: all.length - picked.length };
 }
 
@@ -130,13 +173,15 @@ export function buildModuleContext(all: any[], opts: SearchOptions = {}): {
   };
 } {
   const { picked } = searchModules(all, opts);
-  const lines = picked.map(({ module: m }) => {
+  const lines = picked.map(({ module: m, reasons }) => {
+    const own = String(m.scope || "PUBLIC") === "ORGANIZATION" ? " | 【本组织】"
+      : ["PERSONAL", "TEAM"].includes(String(m.scope)) ? " | 【我的】" : "";
     const ifaces = (m.interfaces || [])
       .map((i: any) => `${i.name}:${i.interface_type}@${i.voltage_level ?? "?"}V`).join(",");
     const power = m.power
       ? `供电${(m.power.input_voltage_range || []).join("-")}V/典型${m.power.typical_current_ma ?? "?"}mA/峰值${m.power.peak_current_ma ?? "?"}mA`
       : "";
-    return `- id=${m.id} | ${m.name} | ${m.category} | 芯片:${m.main_chip ?? "?"} | 接口:[${ifaces}] | ${power} | 认证:${m.certification_status}`;
+    return `- id=${m.id} | ${m.name} | ${m.category} | 芯片:${m.main_chip ?? "?"} | 接口:[${ifaces}] | ${power} | 认证:${m.certification_status}${own}`;
   });
   const omitted = all.length - picked.length;
   const text = lines.join("\n") + (omitted > 0

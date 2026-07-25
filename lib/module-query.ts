@@ -61,16 +61,42 @@ export interface CapabilityQuery {
   usesChip?: string;         // 主芯片子串
   minCompleteness?: number;
   limit?: number;
+  /** 可见范围（P0 安全修复）：不传则 fail-closed，只返回公共模块。
+   *  私有模块绝不能因为调用方忘了传参而泄露给其他组织。 */
+  viewerRef?: string | null;
+  orgRef?: string | null;
+}
+
+/** 可见性 SQL 片段与参数。
+ *  空值用不可能匹配的哨兵值而非 IS NULL —— 否则 org_ref 为空的历史脏数据会被任何人看到。 */
+export const VISIBILITY_SENTINEL = "__none__";
+
+export function visibilityClause(orgRef?: string | null, viewerRef?: string | null) {
+  return {
+    sql: `(scope = 'PUBLIC' OR scope IS NULL
+           OR (scope = 'ORGANIZATION' AND org_ref = ?)
+           OR (scope IN ('PERSONAL','TEAM') AND owner_ref = ?))`,
+    args: [orgRef || VISIBILITY_SENTINEL, viewerRef || VISIBILITY_SENTINEL],
+  };
 }
 
 export async function queryCapabilities(qy: CapabilityQuery) {
   await ensureSchema();
-  const rs = await db().execute("SELECT id, data, certification_status, downloads, rating FROM modules LIMIT 1000");
+  const vis = visibilityClause(qy.orgRef, qy.viewerRef);
+  const rs = await db().execute({
+    sql: `SELECT id, data, certification_status, downloads, rating, scope, owner_ref, org_ref
+          FROM modules WHERE ${vis.sql} LIMIT 1000`,
+    args: vis.args,
+  });
   let list = rs.rows.map((r) => ({
     ...JSON.parse(String(r.data)),
     certification_status: String(r.certification_status),
     downloads: Number(r.downloads || 0),
     rating: Number(r.rating || 0),
+    // 归属信息以数据库列为准，不采信 data JSON 里的值（客户端可能写过）
+    scope: r.scope ? String(r.scope) : "PUBLIC",
+    owner_ref: r.owner_ref ? String(r.owner_ref) : null,
+    org_ref: r.org_ref ? String(r.org_ref) : null,
   }));
 
   if (qy.status !== "all") {
@@ -117,9 +143,17 @@ export interface GovernanceReport {
   bySource: { source: string; count: number }[];
 }
 
-export async function governanceReport(lowThreshold = 60): Promise<GovernanceReport> {
+export async function governanceReport(
+  lowThreshold = 60,
+  vis?: { viewerRef?: string | null; orgRef?: string | null },
+): Promise<GovernanceReport> {
   await ensureSchema();
-  const rs = await db().execute("SELECT id, data, certification_status, source_type FROM modules");
+  // 治理统计同样不得跨组织泄露：org_admin 只应看到本组织数据
+  const v = visibilityClause(vis?.orgRef, vis?.viewerRef);
+  const rs = await db().execute({
+    sql: `SELECT id, data, certification_status, source_type FROM modules WHERE ${v.sql}`,
+    args: v.args,
+  });
   const rows = rs.rows.map((r) => ({
     m: JSON.parse(String(r.data)),
     status: String(r.certification_status),

@@ -12,7 +12,8 @@ export const maxDuration = 120;
 export async function OPTIONS() { return new NextResponse(null, { status: 204 }); }
 
 export async function POST(req: NextRequest) {
-  const tier = (await getRequestIdentity(req)).tier;
+  const identity = await getRequestIdentity(req);
+  const tier = identity.tier;
   let body: any;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "请求体必须是 JSON" }, { status: 400 }); }
 
@@ -36,6 +37,6 @@ export async function POST(req: NextRequest) {
     if (rs.rows.length) stage = String(rs.rows[0].stage) as ProjectStage;
   }
 
-  const result = await runAgent(agent, body.input || {}, { projectId, stage, tier });
+  const result = await runAgent(agent, body.input || {}, { projectId, stage, tier, owner: identity.owner, org: identity.org, orgRole: identity.orgRole });
   return NextResponse.json(result, { status: result.ok ? 200 : 422 });
 }

@@ -26,7 +26,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   const claim = await db().execute({
     sql: `UPDATE agent_tasks SET status='running', attempts=attempts+1, started_at=now(), updated_at=now()
           WHERE task_id=? AND status='queued'
-          RETURNING agent_type, project_id, input, tier, cancel_requested, owner_ref`,
+          RETURNING agent_type, project_id, input, tier, cancel_requested, owner_ref, org_ref`,
     args: [params.id],
   });
   if (!claim.rows.length) {
@@ -49,7 +49,8 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
   try {
     const owner = row.owner_ref ? String(row.owner_ref) : null;
-    const result = await runAgent(agent, input, { projectId, stage, tier, owner, taskId: params.id });
+    const orgRef = row.org_ref ? String(row.org_ref) : null;
+    const result = await runAgent(agent, input, { projectId, stage, tier, owner, org: orgRef, taskId: params.id });
     // 汇总本次任务的模型用量（可追踪到任务与 Artifact）
     const usage = await db().execute({
       sql: `SELECT COALESCE(SUM(input_tokens),0) ti, COALESCE(SUM(output_tokens),0) to_,

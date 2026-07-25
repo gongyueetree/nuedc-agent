@@ -63,9 +63,16 @@ import { NextResponse } from "next/server";
 
 export function resolveOwner(req: NextRequest): { owner: string; isNew: boolean } {
   const key = req.headers.get("x-api-key") || "";
+  // 服务端代理调用：ezPLM 用共享密钥 + 用户头声明身份
   if (process.env.EZPLM_API_KEY && key === process.env.EZPLM_API_KEY) {
     const u = req.headers.get("x-user-id");
     if (u) return { owner: `ezplm:${u}`, isNew: false };
+  }
+  // 嵌入会话 cookie（iframe 场景）：优先级高于匿名 cookie
+  {
+    const { verifySessionCookieToken, SESSION_COOKIE } = require("./ezplm-session");
+    const s = verifySessionCookieToken(req.cookies.get(SESSION_COOKIE)?.value);
+    if (s) return { owner: `ezplm:${s.sub}`, isNew: false };
   }
   const cookie = req.cookies.get("nuedc_uid")?.value;
   if (cookie) return { owner: cookie, isNew: false };
@@ -101,4 +108,28 @@ export async function assertProjectAccess(req: NextRequest, projectId: string): 
     return NextResponse.json({ error: "无权访问该项目" }, { status: 403 });
   }
   return null;
+}
+
+
+/** 组织身份。X-Org-Id / X-Org-Role 只在 X-Api-Key 匹配 EZPLM_API_KEY 时可信；
+ *  否则一律从签名过的会话 cookie 读取 —— 请求头可伪造，cookie 不能。 */
+export function resolveOrg(req: NextRequest): { orgRef: string | null; orgRole: "org_admin" | "member" | null } {
+  const key = req.headers.get("x-api-key") || "";
+  if (process.env.EZPLM_API_KEY && key === process.env.EZPLM_API_KEY) {
+    const org = req.headers.get("x-org-id");
+    if (org) {
+      const role = req.headers.get("x-org-role") === "org_admin" ? "org_admin" : "member";
+      return { orgRef: `ezplm:${org}`, orgRole: role };
+    }
+  }
+  const { verifySessionCookieToken, SESSION_COOKIE } = require("./ezplm-session");
+  const s = verifySessionCookieToken(req.cookies.get(SESSION_COOKIE)?.value);
+  if (s) return { orgRef: `ezplm:${s.org}`, orgRole: s.orgRole };
+
+  // 组织管理后台会话
+  const { readAdminSession, ORG_ADMIN_COOKIE } = require("./admin-session");
+  const a = readAdminSession(req.cookies.get(ORG_ADMIN_COOKIE)?.value, process.env.ADMIN_API_KEY);
+  if (a?.role === "org_admin" && a.org) return { orgRef: a.org, orgRole: "org_admin" };
+
+  return { orgRef: null, orgRole: null };
 }

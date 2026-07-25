@@ -16,6 +16,8 @@ export interface ClaimedTask {
   task_type: string | null;
   project_id: string | null;
   owner_ref: string | null;
+  /** 组织标识：从 agent_tasks 列读取，绝不从 input 里取（客户端可伪造 input） */
+  org_ref: string | null;
   input: string | null;
   tier: string;
   priority: number;
@@ -44,7 +46,7 @@ export async function claimTask(workerId: string, opts: { heavy?: boolean } = {}
             ORDER BY priority ASC, scheduled_at ASC NULLS FIRST, created_at ASC
             LIMIT 1 FOR UPDATE SKIP LOCKED
           )
-          RETURNING task_id, agent_type, task_type, project_id, owner_ref, input, tier,
+          RETURNING task_id, agent_type, task_type, project_id, owner_ref, org_ref, input, tier,
                     priority, attempts, max_attempts, quota_ref, quota_kind`,
     args: [workerId, ...args],
   });
@@ -183,4 +185,70 @@ export async function queueStats() {
     status: String(r.status), priority: Number(r.priority),
     count: Number(r.n), avgWaitSec: Math.round(Number(r.avg_wait)),
   }));
+}
+
+
+/* ============ Worker 存活性 ============ */
+
+/** Worker 存活判定窗口：超过此时长没有心跳即视为已下线 */
+export const WORKER_LIVE_WINDOW_SEC = 60;
+
+/** Worker 定期上报存活。与任务心跳不同：这是「进程还在」的证明，
+ *  即使当前没有任务在跑也要上报，否则 readiness 会误判无可用 Worker。 */
+export async function reportWorkerAlive(info: {
+  workerId: string; heavySlots: number; lightSlots: number; inFlight: number; driver?: string;
+}): Promise<void> {
+  try {
+    await ensureSchema();
+    await db().execute({
+      sql: `INSERT INTO worker_heartbeats (worker_id, started_at, last_seen, heavy_slots, light_slots, in_flight, driver)
+            VALUES (?, now(), now(), ?, ?, ?, ?)
+            ON CONFLICT (worker_id) DO UPDATE SET
+              last_seen = now(), heavy_slots = EXCLUDED.heavy_slots,
+              light_slots = EXCLUDED.light_slots, in_flight = EXCLUDED.in_flight,
+              driver = EXCLUDED.driver`,
+      args: [info.workerId, info.heavySlots, info.lightSlots, info.inFlight, info.driver ?? null],
+    });
+  } catch { /* 心跳失败不影响任务执行 */ }
+}
+
+/** Worker 退出时注销，让 readiness 立刻反映下线 */
+export async function unregisterWorker(workerId: string): Promise<void> {
+  await db().execute({ sql: "DELETE FROM worker_heartbeats WHERE worker_id=?", args: [workerId] }).catch(() => {});
+}
+
+export interface WorkerStatus {
+  live: number;
+  total: number;
+  capacity: { heavy: number; light: number };
+  inFlight: number;
+  workers: { worker_id: string; last_seen: string; in_flight: number; stale: boolean }[];
+}
+
+/** 当前存活的 Worker 概览。live 是判断「任务能不能被消费」的唯一依据。 */
+export async function workerStatus(): Promise<WorkerStatus> {
+  await ensureSchema();
+  const rs = await db().execute({
+    sql: `SELECT worker_id, last_seen, heavy_slots, light_slots, in_flight,
+            (last_seen < now() - interval '${WORKER_LIVE_WINDOW_SEC} seconds') AS stale
+          FROM worker_heartbeats ORDER BY last_seen DESC`,
+    args: [],
+  });
+  const rows = rs.rows as any[];
+  const alive = rows.filter((r) => !r.stale);
+  return {
+    live: alive.length,
+    total: rows.length,
+    capacity: {
+      heavy: alive.reduce((a, r) => a + Number(r.heavy_slots || 0), 0),
+      light: alive.reduce((a, r) => a + Number(r.light_slots || 0), 0),
+    },
+    inFlight: alive.reduce((a, r) => a + Number(r.in_flight || 0), 0),
+    workers: rows.map((r) => ({
+      worker_id: String(r.worker_id),
+      last_seen: String(r.last_seen),
+      in_flight: Number(r.in_flight || 0),
+      stale: !!r.stale,
+    })),
+  };
 }

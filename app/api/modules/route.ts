@@ -11,6 +11,8 @@ export async function OPTIONS() { return new NextResponse(null, { status: 204 })
 export async function GET(req: NextRequest) {
   await ensureSchema();
   const tier = resolveTier(req);
+  const { getRequestIdentity } = await import("@/lib/identity");
+  const identity = await getRequestIdentity(req);
   const sp = new URL(req.url).searchParams;
   const num = (k: string) => (sp.get(k) === null ? undefined : Number(sp.get(k)));
   const bool = (k: string) => (sp.get(k) === null ? undefined : ["true", "1"].includes(sp.get(k)!));
@@ -33,6 +35,9 @@ export async function GET(req: NextRequest) {
     maxPeakMa: num("maxPeak"),
     usesChip: sp.get("chip") || undefined,
     minCompleteness: num("minCompleteness"),
+    // 可见范围来自服务端身份，绝不采信请求参数
+    viewerRef: identity.owner,
+    orgRef: identity.org ?? null,
     limit: num("limit"),
   });
 
@@ -40,11 +45,35 @@ export async function GET(req: NextRequest) {
     const cert = m.certification_status as ModuleCertState;
     return canDownloadAssets(tier, cert) ? m : stripPaidFields(m);
   });
-  return NextResponse.json({ modules, tier });
+  // 后台按归属分组：mine=我的 / org=本组织 / public=公共库 / all=全部可见
+  const sf = sp.get("scope");
+  const filtered = !sf || sf === "all" ? modules
+    : sf === "mine" ? modules.filter((m: any) => m.owner_ref === identity.owner && m.scope !== "ORGANIZATION")
+    : sf === "org" ? modules.filter((m: any) => m.scope === "ORGANIZATION" && m.org_ref === identity.org)
+    : sf === "public" ? modules.filter((m: any) => m.scope === "PUBLIC")
+    : modules;
+
+  return NextResponse.json({
+    modules: filtered, tier,
+    // 供后台显示分组计数
+    counts: {
+      all: modules.length,
+      mine: modules.filter((m: any) => m.owner_ref === identity.owner && m.scope !== "ORGANIZATION").length,
+      org: modules.filter((m: any) => m.scope === "ORGANIZATION" && m.org_ref === identity.org).length,
+      public: modules.filter((m: any) => m.scope === "PUBLIC").length,
+    },
+    org: identity.org, org_role: identity.orgRole,
+  });
 }
 
 // 上传模块（实验室/付费用户）：一律进入 DRAFT 待审核，不直接入正式库
 export async function POST(req: NextRequest) {
+  const { getRequestIdentity } = await import("@/lib/identity");
+  const { resolveOwnership, canCreateModule } = await import("@/lib/module-acl");
+  const postIdentity = await getRequestIdentity(req);
+  if (!canCreateModule(postIdentity)) {
+    return NextResponse.json({ error: "需要登录后才能上传模块" }, { status: 403 });
+  }
   const tier = resolveTier(req);
   if (!canUploadModules(tier)) return NextResponse.json({ error: "上传模块需要付费或实验室账户" }, { status: 402 });
   await ensureSchema();
@@ -52,13 +81,21 @@ export async function POST(req: NextRequest) {
   const parsed = moduleInputSchema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: zodMessage(parsed.error) }, { status: 400 });
 
-  const mod = { ...parsed.data, certification_status: "DRAFT" as const }; // 强制草稿
+  // 归属由服务端按身份决定；客户端传的 scope/owner_ref/org_ref 一律被覆盖
+  const own = resolveOwnership(postIdentity, (parsed.data as any).scope);
+  const mod = {
+    ...parsed.data,
+    certification_status: "DRAFT" as const,   // 强制草稿
+    scope: own.scope, owner_ref: own.owner_ref, org_ref: own.org_ref,
+  };
   const srcType = mod.source_snapshot?.source || "lab";
   try {
     await db().execute({
-      sql: `INSERT INTO modules (id, name, category, version, certification_status, source_type, price, data)
-            VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?)`,
-      args: [mod.id, mod.name, mod.category, mod.version, srcType, mod.price, JSON.stringify(mod)],
+      sql: `INSERT INTO modules (id, name, category, version, certification_status, source_type, price, data,
+              scope, owner_ref, org_ref)
+            VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?)`,
+      args: [mod.id, mod.name, mod.category, mod.version, srcType, mod.price, JSON.stringify(mod),
+        own.scope, own.owner_ref, own.org_ref],
     });
   } catch (e: any) {
     return NextResponse.json({ error: /UNIQUE/.test(String(e)) ? `模块 id "${mod.id}" 已存在` : String(e) }, { status: 409 });

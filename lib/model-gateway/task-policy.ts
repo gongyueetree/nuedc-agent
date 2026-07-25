@@ -4,7 +4,7 @@ export const TASK_TYPES = [
   "PDF_EXTRACT", "PROBLEM_STRUCTURE", "REQUIREMENT_NORMALIZE", "SCORING_EXTRACT",
   "SOLUTION_PRIMARY", "SOLUTION_FALLBACK", "BOM_NORMALIZE", "MODULE_GAP_ANALYSIS",
   "CODE_GENERATE", "CODE_REPAIR", "BUILD_LOG_EXPLAIN", "TEST_PLAN", "TEST_ANALYSIS",
-  "DEBUG_ASSIST", "REPORT_SECTION", "REPORT_POLISH", "GENERAL_QA", "PROCUREMENT_PLAN",
+  "DEBUG_ASSIST", "REPORT_SECTION", "REPORT_POLISH", "GENERAL_QA", "PROCUREMENT_PLAN", "MODULE_INGEST",
 ] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
@@ -86,6 +86,12 @@ export const TASK_POLICIES: Record<TaskType, TaskPolicy> = {
 
   // ---- 其他 ----
   GENERAL_QA:            P("GENERAL_QA", "cheap", 1500, 3, { cacheScope: "global" }),
+
+  // 附件导入：多模态、结果必须人工确认
+  MODULE_INGEST:         P("MODULE_INGEST", "vision", 3000, 2, {
+    schemaMode: "strict", cacheScope: "global", requiresHumanReview: true,
+    timeoutMs: 120_000, maxInputTokens: 20_000,
+  }),
 };
 
 export function policyFor(taskType: TaskType): TaskPolicy {
@@ -105,4 +111,5 @@ export const AGENT_TASK_TYPE: Record<string, TaskType> = {
   report_composer: "REPORT_SECTION",
   orchestrator: "GENERAL_QA",
   test_scoring: "TEST_PLAN",
+  module_ingestion: "MODULE_INGEST",
 };

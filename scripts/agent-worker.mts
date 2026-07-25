@@ -18,7 +18,7 @@
 import { hostname } from "node:os";
 import "../lib/agents/index";
 import { runAgent } from "../lib/agents/base";
-import { claimTask, heartbeat, reclaimExpired, completeTask, failTask, HEARTBEAT_MS, type ClaimedTask } from "../lib/task-queue";
+import { claimTask, heartbeat, reclaimExpired, completeTask, failTask, reportWorkerAlive, unregisterWorker, HEARTBEAT_MS, type ClaimedTask } from "../lib/task-queue";
 import { db, ensureSchema, closeDb, dbDriver } from "../lib/db";
 import type { AgentType, ProjectStage } from "../lib/types";
 
@@ -67,6 +67,8 @@ async function executeOne(task: ClaimedTask): Promise<void> {
       stage,
       tier: task.tier as any,
       owner: task.owner_ref,
+      // 组织来自任务列，不从 input 读 —— 保证异步执行的可见范围与提交者一致
+      org: task.org_ref,
       taskId: task.task_id,
     });
 
@@ -93,6 +95,20 @@ async function executeOne(task: ClaimedTask): Promise<void> {
   } finally {
     clearInterval(hb);
     inFlight--;
+  }
+}
+
+/** 存活上报循环：让 /api/admin/readiness 能看到本 Worker。
+ *  必须独立于任务心跳 —— 空闲时也要上报，否则会被误判为已下线。 */
+async function aliveLoop() {
+  const report = () => reportWorkerAlive({
+    workerId: WORKER_ID, heavySlots: HEAVY_SLOTS, lightSlots: LIGHT_SLOTS,
+    inFlight, driver: dbDriver(),
+  });
+  await report();   // 启动即上报一次，缩短 CI 等待
+  while (!shuttingDown) {
+    await sleep(15_000);
+    if (!shuttingDown) await report();
   }
 }
 
@@ -171,6 +187,7 @@ async function main() {
             WHERE worker_id=? AND status='running'`,
       args: [WORKER_ID],
     }).catch(() => {});
+    await unregisterWorker(WORKER_ID);   // 注销，让 readiness 立刻反映下线
     await closeDb();      // 释放连接池，避免进程挂住
     log("已优雅退出");
     process.exit(0);
@@ -182,6 +199,7 @@ async function main() {
     consumeLoop(true, HEAVY_SLOTS),
     consumeLoop(false, LIGHT_SLOTS),
     reclaimLoop(),
+    aliveLoop(),
   ]);
 }
 

@@ -1,6 +1,6 @@
 // 工程类 Agent：方案架构、接口集成检查、BOM 整理、备料规划
 import { llmJson } from "../llm";
-import { registerAgent, loadModuleIndex, moduleCatalogForLlm, sawPartial } from "./base";
+import { registerAgent, loadModuleIndex, moduleCatalogForLlm, sawPartial, currentAgentContext } from "./base";
 import { buildContext } from "../model-gateway/context-builder";
 import { buildModuleContext, extractTags } from "../module-search";
 import { solutionSchema, connectionSchema, powerRailSchema, parseArrayLoose, bomItemSchema } from "../agent-schemas";
@@ -24,9 +24,12 @@ registerAgent("solution_architect", async (input) => {
   const requirementsForGen = { ...requirements, requirements: reqList.filter((r) => r.status !== "REJECTED") };
 
   // 模块 Top-K 检索：程序侧按可见范围/类别/电压/接口/库存过滤并打分，只把前 20 送进模型
+  // 安全修复：此前从 input.owner_ref / input.org_ref 取可见范围，
+  // 那是客户端可伪造的请求体字段，任何人都能借此读取他人私有模块
+  const actx = currentAgentContext();
   const moduleCtx = buildModuleContext(Object.values(index), {
-    viewerRef: input.owner_ref || null,
-    orgRef: input.org_ref || null,
+    viewerRef: actx.owner ?? null,
+    orgRef: actx.org ?? null,
     requirementTags: extractTags(requirementsForGen.requirements),
     preferred: input.preferred_modules || [],
     topK: 20,
@@ -101,7 +104,10 @@ ${catalog || "（模块库为空，允许方案使用通用模块名，module_id
       const raw = await llmJson<any>({
         system: `${SHARED_RULES}\n\n本次只生成【一套】方案，solution_id 固定为 "${id}"，技术路线取向：${flavor}。
 输出格式（严格遵守，blocks 至少 4 项）：
-{"solution":{"solution_id":"${id}","name":"方案名","summary":"一句话概述","blocks":[{"block_id":"B1","name":"主控","module_id":"库中真实id或留空","role":"mcu","covers_requirements":["REQ-001"]}],"connections":[{"from_block_id":"B1","from_interface_id":"UART0_TX","to_block_id":"B2","to_interface_id":"RX","from":"B1.UART0_TX","to":"B2.RX","protocol":"UART","voltage_from":3.3,"voltage_to":3.3}],"power_tree":[{"rail":"3V3","voltage":3.3,"source":"LDO","loads":["B1"],"budget_ma":500}],"advantages":["..."],"disadvantages":["..."],"risk_level":"low","implementation_hours":40,"uncovered_requirements":[]}}`,
+{"solution":{"solution_id":"${id}","name":"方案名","summary":"一句话概述","blocks":[{"block_id":"B1","name":"主控","module_id":"库中真实id或留空","role":"mcu","covers_requirements":["REQ-001"]}],"connections":[{"from_block_id":"B1","from_interface_id":"UART0_TX","to_block_id":"B2","to_interface_id":"RX","from":"B1.UART0_TX","to":"B2.RX","protocol":"UART","voltage_from":3.3,"voltage_to":3.3}],"power_tree":[{"rail":"3V3","voltage":3.3,"source":"LDO","loads":["B1"],"budget_ma":500}],"advantages":["..."],"disadvantages":["..."],"risk_level":"low","implementation_hours":40,"uncovered_requirements":[]}}
+【模块选用硬规则】目录中标注【本组织】或【我的】的模块，在功能等价时必须优先选用；
+若最终选了公共模块，必须在该功能块的 reason / notes 中说明为什么本组织模块不适用
+（如电压不匹配、接口缺失、电流不足），不得无理由跳过。`,
         messages: [{ role: "user", content: userCtx }],
         maxTokens: 10240,
         temperature: 0.4,

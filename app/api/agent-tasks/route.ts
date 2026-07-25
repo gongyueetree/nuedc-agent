@@ -98,10 +98,10 @@ export async function POST(req: NextRequest) {
   const model: string | null = null;
   await db().execute({
     sql: `INSERT INTO agent_tasks (task_id, project_id, agent_type, status, input, tier, idempotency_key, model,
-            task_type, priority, input_hash, owner_ref, queue_name, quota_ref, quota_kind, scheduled_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, now())`,
+            task_type, priority, input_hash, owner_ref, org_ref, queue_name, quota_ref, quota_kind, scheduled_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, now())`,
     args: [taskId, projectId, agent, "queued", JSON.stringify(body.input || {}), tier, body.idempotency_key || null, model,
-      taskType, policy.priority, hash, id.owner, policy.concurrencyClass, quotaRef, quotaKind],
+      taskType, policy.priority, hash, id.owner, id.org, policy.concurrencyClass, quotaRef, quotaKind],
   });
   return NextResponse.json({ task_id: taskId, status: "queued", model }, { status: 202 });
 }

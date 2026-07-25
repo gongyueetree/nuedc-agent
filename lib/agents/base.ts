@@ -5,6 +5,9 @@ import { STAGE_ALLOWED_AGENTS } from "../types";
 
 export interface AgentContext {
   owner?: string | null;
+  /** 组织标识，决定该次运行能看到哪些私有模块 */
+  org?: string | null;
+  orgRole?: string | null;
   taskId?: string | null;
   projectId: string | null;
   stage: ProjectStage;
@@ -32,6 +35,8 @@ export function registerAgent(type: AgentType, fn: AgentFn) {
  *  把 A 用户的 token 用量记到 B 用户的项目上。ALS 保证每条异步调用链各自隔离。 */
 export interface AgentRunContext {
   owner?: string | null;
+  org?: string | null;
+  orgRole?: string | null;
   projectId?: string | null;
   taskId?: string | null;
   agent?: string;
@@ -60,7 +65,8 @@ export function runAgent(
   ctx: AgentContext
 ): Promise<AgentResult & { run_id: string }> {
   return withAgentContext(
-    { owner: ctx.owner ?? null, projectId: ctx.projectId, taskId: ctx.taskId ?? null, agent: type,
+    { owner: ctx.owner ?? null, org: ctx.org ?? null, orgRole: ctx.orgRole ?? null,
+      projectId: ctx.projectId, taskId: ctx.taskId ?? null, agent: type,
       partialSeen: { value: false } },
     () => runAgentInner(type, input, ctx),
   );
@@ -153,16 +159,31 @@ async function logRun(
   } catch { /* 日志失败不阻断主流程 */ }
 }
 
-/** 从模块表构造检索上下文（给需要模块知识的 Agent 用） */
-export async function loadModuleIndex(limit = 200): Promise<Record<string, any>> {
+/** 从模块表构造检索上下文（给需要模块知识的 Agent 用）。
+ *  可见范围 fail-closed：不传 vis 时只返回公共模块 ——
+ *  私有模块绝不能因为某个 Agent 忘了传参就进入 LLM 上下文。 */
+export async function loadModuleIndex(
+  limit = 200,
+  vis?: { viewerRef?: string | null; orgRef?: string | null },
+): Promise<Record<string, any>> {
   await ensureSchema();
+  const { visibilityClause } = await import("../module-query");
+  const v = visibilityClause(vis?.orgRef, vis?.viewerRef);
   const rs = await db().execute({
-    sql: `SELECT id, data FROM modules WHERE certification_status != 'DEPRECATED' LIMIT ?`,
-    args: [limit],
+    sql: `SELECT id, data, scope, owner_ref, org_ref FROM modules
+          WHERE certification_status != 'DEPRECATED' AND ${v.sql} LIMIT ?`,
+    args: [...v.args, limit],
   });
   const index: Record<string, any> = {};
   for (const row of rs.rows) {
-    try { index[String(row.id)] = JSON.parse(String(row.data)); } catch { /* skip */ }
+    try {
+      const m = JSON.parse(String(row.data));
+      // 归属以数据库列为准，供检索层按组织加权
+      m.scope = row.scope ? String(row.scope) : "PUBLIC";
+      m.owner_ref = row.owner_ref ? String(row.owner_ref) : null;
+      m.org_ref = row.org_ref ? String(row.org_ref) : null;
+      index[String(row.id)] = m;
+    } catch { /* skip */ }
   }
   return index;
 }

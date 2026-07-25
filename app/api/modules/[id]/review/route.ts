@@ -9,7 +9,21 @@ export async function OPTIONS() { return new NextResponse(null, { status: 204 })
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
   const tier = resolveTier(req);
-  if (!canReviewModules(tier)) return NextResponse.json({ error: "审核需要实验室或管理员账户" }, { status: 403 });
+  const { getRequestIdentity } = await import("@/lib/identity");
+  const { canReviewModule, canPromoteTo, maxPromotableState } = await import("@/lib/module-acl");
+  const revId = await getRequestIdentity(req);
+  const cur = await db().execute({
+    sql: "SELECT scope, owner_ref, org_ref, certification_status FROM modules WHERE id=?",
+    args: [params.id],
+  });
+  if (!cur.rows.length) return NextResponse.json({ error: "模块不存在" }, { status: 404 });
+  const mrow: any = cur.rows[0];
+  const modRef = {
+    scope: mrow.scope ? String(mrow.scope) : null,
+    owner_ref: mrow.owner_ref ? String(mrow.owner_ref) : null,
+    org_ref: mrow.org_ref ? String(mrow.org_ref) : null,
+  };
+  if (!canReviewModule(revId, modRef)) return NextResponse.json({ error: "模块不存在" }, { status: 404 });
   await ensureSchema();
   const body = await req.json(); // { result: approved|changes_required|rejected, to_status?, issues? }
 
@@ -37,6 +51,13 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         error: `晋级到 ${to} 需要至少一条 E5（实验室实测）及以上的参数证据。请先在模块编辑页的「参数证据」区录入实测记录（含测试条件与来源编号）。`,
       }, { status: 422 });
     }
+  }
+  // 组织自建模块的认证封顶：不得自称赛用认证
+  if (!canPromoteTo(revId, modRef, to as any)) {
+    return NextResponse.json({
+      error: `你最高只能将本组织模块晋级到 ${maxPromotableState(revId, modRef)}。` +
+             `更高等级（如 COMPETITION_READY）由平台实验室统一评定。`,
+    }, { status: 403 });
   }
   data.certification_status = to;
   await db().execute({

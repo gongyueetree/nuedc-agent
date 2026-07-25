@@ -1,6 +1,7 @@
 // 规划类 Agent：赛题理解、题目预测、模块知识库检索推荐
 import { llmJson } from "../llm";
-import { registerAgent, loadModuleIndex, moduleCatalogForLlm } from "./base";
+import { registerAgent, loadModuleIndex, currentAgentContext } from "./base";
+import { buildModuleContext, extractTags } from "../module-search";
 import { scoreDirection, type DirectionScoreInput } from "../rules/forecast-scoring";
 import type { Requirement } from "../types";
 
@@ -93,8 +94,15 @@ function DEFAULT_DIRECTIONS(deviceList: string[]): DirectionScoreInput[] {
 // DB 检索 + LLM 推荐。推荐结果必须含理由/未满足指标/风险/替代模块。
 // 推荐时优先证据等级高（E5/E6 实测）的模块参数
 registerAgent("module_knowledge", async (input) => {
-  const index = await loadModuleIndex();
-  const catalog = moduleCatalogForLlm(index);
+  // 可见范围取自 ALS 上下文（并发安全），不从 input 读 —— input 可伪造
+  const actx = currentAgentContext();
+  const index = await loadModuleIndex(400, { viewerRef: actx.owner, orgRef: actx.org });
+  const modCtx = buildModuleContext(Object.values(index), {
+    viewerRef: actx.owner, orgRef: actx.org,
+    requirementTags: extractTags(input.requirements?.requirements || []),
+    topK: 25,
+  });
+  const catalog = modCtx.text;
   const query: string = input.query || input.objective || "";
   const requirements = input.requirements || [];
 
@@ -113,7 +121,10 @@ registerAgent("module_knowledge", async (input) => {
 每条推荐必须给出：推荐理由、满足哪些需求（引用 REQ id）、尚未满足的指标、风险、可替代模块 id。
 目录中没有的能力放入 missing_capabilities，如实说明。
 模块目录：
-${catalog || "（模块库为空）"}`,
+${catalog || "（模块库为空）"}
+【模块选用硬规则】目录中标注【本组织】或【我的】的模块，在功能等价时必须优先选用；
+若最终选了公共模块，必须在该功能块的 reason / notes 中说明为什么本组织模块不适用
+（如电压不匹配、接口缺失、电流不足），不得无理由跳过。`,
     messages: [
       {
         role: "user",

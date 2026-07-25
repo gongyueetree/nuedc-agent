@@ -19,7 +19,11 @@ const REAL = args.includes("--real");
 const POLL_TIMEOUT_MS = Number(arg("timeout", process.env.LOAD_TIMEOUT_SEC || "300")) * 1000;
 /** queue-only：只验证入队→去重→配额→查询链路，不等待模型执行完成。
  *  CI 用这个模式做几分钟内可完成的门禁冒烟。 */
-const MODE = (arg("mode", process.env.LOAD_MODE || "full") as "full" | "queue-only");
+const RAW_MODE = arg("mode", process.env.LOAD_MODE || "full");
+/** mock-provider：端到端跑完（要求有 Worker 消费），与 full 等价但语义更明确
+ *  queue-only：只验入队链路，不等执行 */
+const MODE = (RAW_MODE === "mock-provider" ? "full" : RAW_MODE) as "full" | "queue-only";
+const MODE_LABEL = RAW_MODE;
 const OUT_FILE = arg("out", process.env.LOAD_OUT || "");
 
 // 费用保护：full 模式会真正触发模型执行，需显式确认；
@@ -232,7 +236,7 @@ async function preflight(): Promise<boolean> {
 
 async function main() {
   console.log(`压测目标：${BASE}`);
-  console.log(`并发用户：${USERS} · 爬坡：${RAMP_SEC}s · 模式：${REAL ? "⚠ 真实模型" : "mock"}\n`);
+  console.log(`并发用户：${USERS} · 爬坡：${RAMP_SEC}s · 模式：${MODE_LABEL}${REAL ? "（⚠ 真实模型）" : ""}\n`);
 
   if (!(await preflight())) process.exit(2);
 
@@ -292,7 +296,7 @@ async function main() {
     const path = await import("node:path");
     fs.mkdirSync(path.dirname(OUT_FILE), { recursive: true });
     fs.writeFileSync(OUT_FILE, JSON.stringify({
-      mode: MODE, users: USERS, wall_seconds: wall,
+      mode: MODE_LABEL, users: USERS, wall_seconds: wall,
       success_rate: passRate, successes: ok.length,
       http_429: results.filter((r) => r.http429).length,
       db_errors: results.filter((r) => r.dbError).length,
@@ -313,7 +317,7 @@ async function main() {
     console.log(`\n结果已写入 ${OUT_FILE}`);
   }
 
-  console.log(`\n判定：${pass ? "✓ 达标" : "✗ 未达标"}（成功率 ≥90% 且 P95 ≤${p95Limit}s，模式 ${MODE}）`);
+  console.log(`\n判定：${pass ? "✓ 达标" : "✗ 未达标"}（成功率 ≥90% 且 P95 ≤${p95Limit}s，模式 ${MODE_LABEL}）`);
   process.exit(pass ? 0 : 1);
 }
 

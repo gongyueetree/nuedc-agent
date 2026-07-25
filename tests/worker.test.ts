@@ -138,3 +138,63 @@ describe("固件编译 workflow 的可选性", () => {
     expect(guard).toContain("跳过固件编译");
   });
 })
+
+describe("Worker 存活性与就绪检查（heavy 压测依赖）", () => {
+  it("Worker 独立上报存活，空闲时也上报", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    expect(src).toContain("aliveLoop");
+    expect(src).toContain("reportWorkerAlive");
+    // 启动即上报，缩短 CI 等待
+    expect(src).toContain("await report();");
+    // 退出时注销，让 readiness 立刻反映下线
+    expect(src).toContain("unregisterWorker");
+  });
+
+  it("workerStatus 用时间窗口判断存活，不只看记录是否存在", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/task-queue.ts", "utf8");
+    expect(src).toContain("WORKER_LIVE_WINDOW_SEC");
+    expect(src).toContain("last_seen < now() - interval");
+    expect(src).toContain("stale");
+  });
+
+  it("/api/admin/readiness 提供可断言的结构化指标", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/admin/readiness/route.ts", "utf8");
+    for (const k of ["workers", "queue", "providers", "system_mode", "migrations_applied"]) {
+      expect(src, `readiness 缺少 ${k}`).toContain(k);
+    }
+    // 含运行拓扑，必须限管理员
+    expect(src).toContain('resolveTier(req) !== "admin"');
+  });
+
+  it("assert-readiness 按模式区分要求：mock-provider 要 Worker，queue-only 反而不要", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/assert-readiness.mjs", "utf8");
+    expect(src).toContain('MODE === "mock-provider"');
+    expect(src).toContain('MODE === "queue-only"');
+    expect(src).toContain("没有存活 Worker");
+    expect(src).toContain("会消费掉任务导致队列指标失真");
+    // 压测绝不能烧真钱
+    expect(src).toContain("mock 模式");
+    expect(src).toContain("会产生真实费用");
+  });
+
+  it("collect-db-stats 收集瓶颈定位所需的指标", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/collect-db-stats.mjs", "utf8");
+    for (const s of ["任务状态分布", "Worker 心跳", "数据库连接", "模型调用统计"]) {
+      expect(src, `缺少统计项 ${s}`).toContain(s);
+    }
+    // 无数据库时不能让 CI 红灯
+    expect(src).toContain("跳过数据库统计");
+  });
+
+  it("压测支持 mock-provider 模式（heavy workflow 使用）", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/load-test.mts", "utf8");
+    expect(src).toContain('RAW_MODE === "mock-provider"');
+    expect(src).toContain("MODE_LABEL");
+  });
+});

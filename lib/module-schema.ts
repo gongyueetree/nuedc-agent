@@ -74,6 +74,10 @@ export const moduleInputSchema = z.object({
   schematic_assets: z.array(z.string()).default([]),
   pcb_assets: z.array(z.string()).default([]),
   images: z.array(z.string()).default([]),
+  // 归属字段：服务端按 identity 覆盖，客户端传值不作数
+  scope: z.enum(["PERSONAL", "TEAM", "ORGANIZATION", "PUBLIC"]).default("PUBLIC").optional(),
+  owner_ref: z.string().nullish(),
+  org_ref: z.string().nullish(),
   code_repositories: z.array(z.string()).default([]),
   datasheet_url: z.string().optional(),
 

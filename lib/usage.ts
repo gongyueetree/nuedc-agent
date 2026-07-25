@@ -9,6 +9,8 @@ export const DAILY_QUOTA: Record<string, Record<UserTier, number>> = {
   pdf_extract: { free: 2, paid: 20, lab: -1, admin: -1 },
   // 重型生成任务（方案/代码/报告）：防止单用户刷爆全局预算
   heavy_task: { free: 10, paid: 100, lab: -1, admin: -1 },
+  // 附件导入：免费用户不开放
+  module_ingest: { free: 0, paid: 10, lab: -1, admin: -1 },
 };
 
 export function quotaFor(kind: string, tier: UserTier): number {

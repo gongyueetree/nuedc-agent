@@ -11,7 +11,15 @@ export async function OPTIONS() { return new NextResponse(null, { status: 204 })
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   await ensureSchema();
   const tier = resolveTier(req);
-  const rs = await db().execute({ sql: "SELECT data, certification_status, downloads FROM modules WHERE id=?", args: [params.id] });
+  const { getRequestIdentity } = await import("@/lib/identity");
+  const id = await getRequestIdentity(req);
+  const { visibilityClause } = await import("@/lib/module-query");
+  const vis = visibilityClause((id as any).org ?? null, id.owner);
+  // 越权一律 404 而非 403：403 会泄露"这个模块存在"
+  const rs = await db().execute({
+    sql: `SELECT data, certification_status, downloads FROM modules WHERE id=? AND ${vis.sql}`,
+    args: [params.id, ...vis.args],
+  });
   if (!rs.rows.length) return NextResponse.json({ error: "模块不存在" }, { status: 404 });
   const data = JSON.parse(String(rs.rows[0].data));
   const cert = String(rs.rows[0].certification_status) as ModuleCertState;
@@ -25,7 +33,24 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   const tier = resolveTier(req);
-  if (!canReviewModules(tier)) return NextResponse.json({ error: "修改模块需要实验室或管理员账户" }, { status: 403 });
+  // 权限按「谁拥有这个模块」判定，而非只看 tier —— 组织管理员应能改本组织模块
+  const { getRequestIdentity } = await import("@/lib/identity");
+  const { canEditModule } = await import("@/lib/module-acl");
+  const editId = await getRequestIdentity(req);
+  const cur = await db().execute({
+    sql: "SELECT scope, owner_ref, org_ref, certification_status FROM modules WHERE id=?",
+    args: [params.id],
+  });
+  // 模块不存在、或无权编辑，一律 404（不泄露存在性）
+  if (!cur.rows.length) return NextResponse.json({ error: "模块不存在" }, { status: 404 });
+  const row: any = cur.rows[0];
+  if (!canEditModule(editId, {
+    scope: row.scope ? String(row.scope) : null,
+    owner_ref: row.owner_ref ? String(row.owner_ref) : null,
+    org_ref: row.org_ref ? String(row.org_ref) : null,
+  })) {
+    return NextResponse.json({ error: "模块不存在" }, { status: 404 });
+  }
   await ensureSchema();
   const body = await req.json();
   const parsed = moduleUpdateSchema.safeParse(body);

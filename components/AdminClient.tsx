@@ -24,6 +24,9 @@ export default function AdminClient() {
   const [draft, setDraft] = useState<any>(null);
   const [isNew, setIsNew] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
+  // 组织身份与归属分组（ezPLM 组织管理员登录时生效）
+  const [orgInfo, setOrgInfo] = useState<{ org: string | null; role: string | null; counts: any }>({ org: null, role: null, counts: null });
+  const [scopeTab, setScopeTab] = useState<"all" | "org" | "mine" | "public">("all");
 
   const H = useCallback((_k?: string) => ({ "content-type": "application/json" }), []);  // 鉴权走 httpOnly cookie
   const flash = (kind: "ok" | "err", msg: string) => { setToast({ kind, msg }); setTimeout(() => setToast(null), 2600); };
@@ -32,9 +35,11 @@ export default function AdminClient() {
     const g = await fetch("/api/modules/governance");
     if (!g.ok) throw new Error((await g.json()).error || "未授权");
     setGov(await g.json());
-    const m = await fetch("/api/modules?status=all&limit=500");
-    setMods((await m.json()).modules || []);
-  }, []);
+    const m = await fetch(`/api/modules?status=all&limit=500&scope=${scopeTab}`);
+    const d = await m.json();
+    setMods(d.modules || []);
+    setOrgInfo({ org: d.org ?? null, role: d.org_role ?? null, counts: d.counts ?? null });
+  }, [scopeTab]);
 
   useEffect(() => {
     // 已有会话 cookie 则直接进入
@@ -101,8 +106,13 @@ export default function AdminClient() {
         <b>模块数据库 CMS</b>
         <div className="seg">
           <button className={tab === "modules" ? "on" : ""} onClick={() => setTab("modules")}>模块</button>
-          <button className={tab === "categories" ? "on" : ""} onClick={() => setTab("categories")}>分类管理</button>
-          <button className={tab === "governance" ? "on" : ""} onClick={() => setTab("governance")}>数据治理</button>
+          {/* 分类体系与全局治理属于平台职责，组织管理员不参与 */}
+          {orgInfo.role !== "org_admin" && (
+            <>
+              <button className={tab === "categories" ? "on" : ""} onClick={() => setTab("categories")}>分类管理</button>
+              <button className={tab === "governance" ? "on" : ""} onClick={() => setTab("governance")}>数据治理</button>
+            </>
+          )}
         </div>
         <span style={{ flex: 1 }} />
         <a className="btn ghost sm" href="/">站点首页</a>
@@ -117,6 +127,21 @@ export default function AdminClient() {
         <div className="cms-body">
           <div className="cms-list">
             <button className="btn sm" style={{ width: "100%", marginBottom: 8 }} onClick={newModule}>＋ 新建模块</button>
+            {orgInfo.role === "org_admin" && (
+              <div className="issue info" style={{ display: "block", marginBottom: 8 }}>
+                你以<b>组织管理员</b>身份登录（{orgInfo.org}）。可编辑本组织模块，
+                认证状态最高可评定到 FUNCTION_TESTED；公共模块库由平台维护，此处只读。
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+              {([
+                ["all", "全部可见"], ["org", "本组织"], ["mine", "我的"], ["public", "公共库"],
+              ] as const).map(([k, label]) => (
+                <button key={k} className={"fchip" + (scopeTab === k ? " on" : "")} onClick={() => setScopeTab(k)}>
+                  {label}{orgInfo.counts ? ` ${orgInfo.counts[k] ?? 0}` : ""}
+                </button>
+              ))}
+            </div>
             <input placeholder="搜索 名称 / id / 芯片…" value={filter} onChange={(e) => setFilter(e.target.value)}
               style={{ width: "100%", padding: 7, borderRadius: 7, border: "1px solid var(--line)", marginBottom: 6 }} />
             <select value={catFilter} onChange={(e) => setCatFilter(e.target.value)}
@@ -140,7 +165,7 @@ export default function AdminClient() {
           </div>
 
           <div className="cms-editor">
-            {draft ? <Editor draft={draft} setDraft={setDraft} isNew={isNew} onSave={save} onCancel={() => setDraft(null)}
+            {draft ? <Editor draft={draft} setDraft={setDraft} isNew={isNew} orgRole={orgInfo.role} onSave={save} onCancel={() => setDraft(null)}
               onReview={!isNew ? review : undefined} />
               : <div className="cms-empty">← 从左侧选择模块编辑<br />或点「新建模块」</div>}
           </div>
@@ -153,7 +178,7 @@ export default function AdminClient() {
 }
 
 /* ============ 分区表单编辑器 ============ */
-function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview }: any) {
+function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview, orgRole }: any) {
 
   /** 上传图片：浏览器端压缩到合理尺寸后存为 data URL。
    *  这样图片随模块数据一起保存，不需要外部图床，也不会遇到淘宝那类站点的防盗链。 */
@@ -249,6 +274,17 @@ function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview }: any) {
             onChange={(e) => set("tags", e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} /></F>
         </div>
         <F label="描述"><textarea value={draft.description || ""} onChange={(e) => set("description", e.target.value)} style={{ minHeight: 56 }} /></F>
+        <F label="可见范围">
+          <select value={draft.scope || "PUBLIC"} onChange={(e) => set("scope", e.target.value)}
+            disabled={draft.scope === "PUBLIC" && orgRole === "org_admin"}>
+            <option value="PUBLIC">公共库（所有用户可见）</option>
+            <option value="ORGANIZATION">本组织（仅本组织成员可见）</option>
+            <option value="PERSONAL">仅自己可见</option>
+          </select>
+          <p className="hint" style={{ margin: "4px 0 0" }}>
+            实际归属以服务端身份为准：组织用户创建的模块自动归本组织，不会写入公共库。
+          </p>
+        </F>
         <F label="图片">
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <label className="btn sm" style={{ display: "inline-block", cursor: "pointer" }}>
@@ -389,7 +425,13 @@ function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview }: any) {
       {onReview && (
         <section>
           <h4>审核操作</h4>
-          <p className="hint">通过 → 沿认证状态机晋级一级；驳回 → 退回 DRAFT。</p>
+          <p className="hint">
+            通过 → 沿认证状态机晋级一级；驳回 → 退回 DRAFT。
+            {orgRole === "org_admin" && (
+              <><br />组织模块最高可评定到 <b>FUNCTION_TESTED</b>；
+              BENCHMARKED 与 COMPETITION_READY 由平台实验室统一评定。</>
+            )}
+          </p>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn sm ok" onClick={() => onReview(draft.id, "approved")}>通过晋级 ↑</button>
             <button className="btn ghost sm danger" onClick={() => onReview(draft.id, "rejected")}>驳回</button>

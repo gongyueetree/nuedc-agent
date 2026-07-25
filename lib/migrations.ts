@@ -434,6 +434,34 @@ ALTER TABLE modules ADD COLUMN IF NOT EXISTS inventory_qty INTEGER DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_modules_scope ON modules(scope, certification_status);
 `,
   },
+  {
+    id: 16,
+    name: "org_module_scope_api",
+    sql: `
+UPDATE modules SET scope='PUBLIC' WHERE scope IS NULL;
+CREATE INDEX IF NOT EXISTS idx_modules_org ON modules(org_ref) WHERE org_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_modules_owner ON modules(owner_ref) WHERE owner_ref IS NOT NULL;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS org_ref TEXT;
+CREATE INDEX IF NOT EXISTS idx_tasks_org ON agent_tasks(org_ref, created_at);
+`,
+  },
+  {
+    id: 17,
+    name: "worker_heartbeats",
+    sql: `
+CREATE TABLE IF NOT EXISTS worker_heartbeats (
+  worker_id TEXT PRIMARY KEY,
+  started_at TIMESTAMPTZ DEFAULT now(),
+  last_seen TIMESTAMPTZ DEFAULT now(),
+  heavy_slots INTEGER DEFAULT 0,
+  light_slots INTEGER DEFAULT 0,
+  in_flight INTEGER DEFAULT 0,
+  driver TEXT,
+  version TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_worker_seen ON worker_heartbeats(last_seen DESC);
+`,
+  },
 ];
 
 let applied = false;
