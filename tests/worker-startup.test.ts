@@ -147,7 +147,7 @@ describe("崩溃循环防护", () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
     const fn = src.slice(src.indexOf("async function waitForSchema"), src.indexOf("/** 存活上报循环"));
-    expect(fn).toContain("await ensureSchema()");
+    expect(fn).toContain("ensureSchema({ force: true })");
     expect(fn).toContain("恢复正常工作");
   });
 
@@ -170,5 +170,42 @@ describe("崩溃循环防护", () => {
       const ok = tail.includes("WORKER_FATAL_DELAY_MS") || tail.includes("Worker 致命错误");
       expect(ok, `某个 exit(1) 缺少延迟：${tail.slice(-120)}`).toBe(true);
     }
+  });
+});
+
+describe("待命自愈的有效性", () => {
+  it("待命循环强制重跑迁移，不被进程内缓存挡住", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    const fn = src.slice(src.indexOf("async function waitForSchema"), src.indexOf("/** 存活上报循环"));
+    // 不加 force 时 ensureSchema 因 applied 标志直接 return，待命循环会空转
+    expect(fn).toContain("ensureSchema({ force: true })");
+    expect(fn).toContain("会直接 return 空转");
+  });
+
+  it("ensureMigrations 支持 force 与缓存重置", async () => {
+    const { ensureMigrations, resetMigrationCache } = await import("../lib/migrations");
+    expect(typeof resetMigrationCache).toBe("function");
+
+    let stmts = 0;
+    const exec = {
+      async execute(s: any) {
+        const sql = typeof s === "string" ? s : s.sql;
+        if (/SELECT id FROM schema_migrations/.test(sql)) return { rows: [] };
+        if (/^\s*(CREATE|ALTER|UPDATE|INSERT)/i.test(sql)) stmts++;
+        return { rows: [] };
+      },
+    };
+    resetMigrationCache();
+    await ensureMigrations(exec as any);
+    const first = stmts;
+    expect(first).toBeGreaterThan(0);
+
+    await ensureMigrations(exec as any);                    // 缓存生效
+    expect(stmts).toBe(first);
+
+    await ensureMigrations(exec as any, { force: true });    // 强制重跑
+    expect(stmts).toBeGreaterThan(first);
+    resetMigrationCache();
   });
 });

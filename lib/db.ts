@@ -186,13 +186,15 @@ export async function closeDb(): Promise<void> {
   _txPoolKind = null;
 }
 
-import { ensureMigrations } from "./migrations";
+import { ensureMigrations, resetMigrationCache } from "./migrations";
+
+export { resetMigrationCache };
 
 export { SCHEMA_SQL } from "./schema-sql";
 
-export async function ensureSchema() {
+export async function ensureSchema(opts: { force?: boolean } = {}) {
   // 静态导入：动态 import 在 data-URL 入口下无法解析相对路径
-  await ensureMigrations(db());
+  await ensureMigrations(db(), opts);
 }
 
 export function uid(prefix: string): string {

@@ -552,8 +552,15 @@ CREATE INDEX IF NOT EXISTS idx_modules_owner ON modules(owner_ref) WHERE owner_r
 
 let applied = false;
 
-export async function ensureMigrations(exec: Executor): Promise<void> {
-  if (applied) return;
+/** 清除「本进程已执行迁移」的缓存。
+ *  Worker 的待命自愈循环需要它：进程内首次 ensureSchema 成功后 applied=true，
+ *  后续调用会直接 return，导致运维补跑迁移后 Worker 仍看不到新列、永远自愈不了。 */
+export function resetMigrationCache(): void {
+  applied = false;
+}
+
+export async function ensureMigrations(exec: Executor, opts: { force?: boolean } = {}): Promise<void> {
+  if (applied && !opts.force) return;
   const c = exec;
   await c.execute(`CREATE TABLE IF NOT EXISTS schema_migrations (
     id INTEGER PRIMARY KEY, name TEXT, applied_at TIMESTAMPTZ DEFAULT now()

@@ -175,8 +175,11 @@ async function waitForSchema(): Promise<void> {
 
     await bumpWorkerMetric(WORKER_ID, "schema_mismatch", `missing: ${missing.join(",")}`);
 
-    // 重新尝试迁移：新版本代码带来的迁移会在这里生效
-    try { await ensureSchema(); } catch { /* 下一轮继续 */ }
+    // 强制重跑迁移：ensureSchema 有进程内缓存，不加 force 会直接 return 空转，
+    // 导致运维补跑迁移后 Worker 依然看不到新列
+    try { await ensureSchema({ force: true }); } catch (e: any) {
+      log(`  迁移重试失败：${String(e?.message || e).slice(0, 140)}`);
+    }
     await sleep(RECHECK_MS);
   }
 }
