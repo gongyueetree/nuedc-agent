@@ -373,6 +373,112 @@ describe.skipIf(!hasDb)("事务与配额原子性（真实 PostgreSQL）", () =>
     });
   });
 });
+
+  describe("迁移并发与批量回收", () => {
+    beforeEach(async () => {
+      await q("DROP TABLE IF EXISTS tx_test_migrations");
+      await q("TRUNCATE tx_test_agent_tasks");
+    });
+
+    it("两个并发迁移执行者只有一个真正执行（advisory lock）", async () => {
+      // 用真实 advisory lock 验证跨会话互斥
+      const LOCK = 774_211_903;
+      const c1 = await pool.connect();
+      const c2 = await pool.connect();
+      try {
+        await c1.query("SELECT pg_advisory_lock($1)", [LOCK]);
+        // 第二个会话尝试非阻塞获取，必须失败
+        const r = await c2.query("SELECT pg_try_advisory_lock($1) AS got", [LOCK]);
+        expect(r.rows[0].got).toBe(false);
+
+        await c1.query("SELECT pg_advisory_unlock($1)", [LOCK]);
+        const r2 = await c2.query("SELECT pg_try_advisory_lock($1) AS got", [LOCK]);
+        expect(r2.rows[0].got).toBe(true);
+        await c2.query("SELECT pg_advisory_unlock($1)", [LOCK]);
+      } finally { c1.release(); c2.release(); }
+    });
+
+    it("1000 条过期任务分批回收，不形成超长事务", async () => {
+      const BATCH = 200;
+      // 造 1000 条过期任务：600 条可重试、400 条已达上限
+      const rows: string[] = [];
+      for (let i = 0; i < 1000; i++) {
+        const attempts = i < 600 ? 0 : 3;
+        rows.push(`('B${i}','running','W',${attempts},3,'u1',NULL,NULL, now() - interval '1 hour')`);
+      }
+      await q(`INSERT INTO tx_test_agent_tasks
+               (task_id,status,worker_id,attempts,max_attempts,owner_ref,quota_ref,quota_kind,lease_expires_at)
+               VALUES ${rows.join(",")}`);
+
+      let requeued = 0, dead = 0, batches = 0;
+      for (; batches < 50; batches++) {
+        const c = await pool.connect();
+        let moved = 0;
+        try {
+          await c.query("BEGIN");
+          const rq = await c.query(
+            `UPDATE tx_test_agent_tasks SET status='queued', worker_id=NULL, lease_expires_at=NULL
+             WHERE task_id IN (
+               SELECT task_id FROM tx_test_agent_tasks
+               WHERE status='running' AND lease_expires_at < now() AND attempts < max_attempts
+               ORDER BY lease_expires_at LIMIT $1 FOR UPDATE SKIP LOCKED
+             ) RETURNING task_id`, [BATCH]);
+          const dd = await c.query(
+            `UPDATE tx_test_agent_tasks SET status='dead', worker_id=NULL, lease_expires_at=NULL,
+               completed_at=now()
+             WHERE task_id IN (
+               SELECT task_id FROM tx_test_agent_tasks
+               WHERE status='running' AND lease_expires_at < now() AND attempts >= max_attempts
+               ORDER BY lease_expires_at LIMIT $1 FOR UPDATE SKIP LOCKED
+             ) RETURNING task_id`, [BATCH]);
+          await c.query("COMMIT");
+          requeued += rq.rowCount ?? 0;
+          dead += dd.rowCount ?? 0;
+          moved = (rq.rowCount ?? 0) + (dd.rowCount ?? 0);
+        } catch (e) {
+          await c.query("ROLLBACK").catch(() => {});
+          throw e;
+        } finally { c.release(); }
+        if (moved === 0) break;
+      }
+
+      expect(requeued).toBe(600);
+      expect(dead).toBe(400);
+      expect(batches).toBeGreaterThan(1);        // 确实分了多批
+      expect(batches).toBeLessThanOrEqual(50);
+
+      const left = await q(`SELECT COUNT(*) AS n FROM tx_test_agent_tasks WHERE status='running'`);
+      expect(Number(left[0].n)).toBe(0);
+    }, 60_000);
+
+    it("SKIP LOCKED 让并发回收互不阻塞", async () => {
+      await q(`INSERT INTO tx_test_agent_tasks
+               (task_id,status,worker_id,attempts,max_attempts,lease_expires_at)
+               VALUES ('S1','running','W',0,3, now() - interval '1 hour'),
+                      ('S2','running','W',0,3, now() - interval '1 hour')`);
+
+      const c1 = await pool.connect();
+      const c2 = await pool.connect();
+      try {
+        await c1.query("BEGIN");
+        // 会话 1 锁住第一条
+        await c1.query(
+          `SELECT task_id FROM tx_test_agent_tasks
+           WHERE status='running' ORDER BY task_id LIMIT 1 FOR UPDATE SKIP LOCKED`);
+
+        // 会话 2 应跳过被锁的那条，拿到另一条，而不是阻塞等待
+        await c2.query("BEGIN");
+        const r2 = await c2.query(
+          `SELECT task_id FROM tx_test_agent_tasks
+           WHERE status='running' ORDER BY task_id LIMIT 1 FOR UPDATE SKIP LOCKED`);
+        expect(r2.rows.length).toBe(1);
+        expect(r2.rows[0].task_id).toBe("S2");
+
+        await c1.query("ROLLBACK");
+        await c2.query("ROLLBACK");
+      } finally { c1.release(); c2.release(); }
+    });
+  });
 });
 
 describe.skipIf(hasDb)("事务集成测试未运行", () => {
@@ -385,4 +491,5 @@ describe.skipIf(hasDb)("事务集成测试未运行", () => {
     );
     expect(true).toBe(true);
   });
+
 });

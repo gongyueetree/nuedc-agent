@@ -548,31 +548,79 @@ CREATE INDEX IF NOT EXISTS idx_modules_org ON modules(org_ref) WHERE org_ref IS 
 CREATE INDEX IF NOT EXISTS idx_modules_owner ON modules(owner_ref) WHERE owner_ref IS NOT NULL;
 `,
   },
+  {
+    id: 20,
+    name: "worker_schema_state",
+    sql: `
+ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS schema_waiting INTEGER DEFAULT 0;
+ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS auto_migrate INTEGER DEFAULT 0;
+`,
+  },
 ];
 
 let applied = false;
+/** 进程内互斥：并发调用共享同一次执行，避免同一进程重复跑 DDL */
+let inflight: Promise<void> | null = null;
 
-/** 清除「本进程已执行迁移」的缓存。
- *  Worker 的待命自愈循环需要它：进程内首次 ensureSchema 成功后 applied=true，
- *  后续调用会直接 return，导致运维补跑迁移后 Worker 仍看不到新列、永远自愈不了。 */
+/** PostgreSQL advisory lock 编号。跨实例互斥用：
+ *  多个 Web/Worker 实例同时启动时，只有拿到锁的那个执行迁移，
+ *  其余等待其完成后直接看到已迁移的结果。
+ *  数值任意但必须全局唯一，这里取项目名的稳定哈希。 */
+const MIGRATION_LOCK_ID = 774_211_903;
+
+/** 仅供 Worker 自愈路径使用：清除「本进程已执行迁移」的缓存。
+ *  不要在业务代码里调用 —— 绕过缓存意味着每次都要重新走一遍锁与全量检查。
+ *  @internal */
 export function resetMigrationCache(): void {
   applied = false;
+  inflight = null;
 }
 
 export async function ensureMigrations(exec: Executor, opts: { force?: boolean } = {}): Promise<void> {
   if (applied && !opts.force) return;
+
+  // 进程内互斥：并发调用复用同一个 Promise。
+  // force 同样要走这里 —— 否则两个待命循环可能同时执行 DDL。
+  if (inflight) return inflight;
+
+  inflight = runMigrations(exec).finally(() => { inflight = null; });
+  return inflight;
+}
+
+async function runMigrations(exec: Executor): Promise<void> {
   const c = exec;
-  await c.execute(`CREATE TABLE IF NOT EXISTS schema_migrations (
-    id INTEGER PRIMARY KEY, name TEXT, applied_at TIMESTAMPTZ DEFAULT now()
-  )`);
-  const rs = await c.execute("SELECT id FROM schema_migrations");
-  const done = new Set(rs.rows.map((r) => Number(r.id)));
-  for (const m of MIGRATIONS) {
-    if (done.has(m.id)) continue;
-    for (const stmt of m.sql.split(";").map((s) => s.trim()).filter(Boolean)) {
-      await c.execute(stmt);
-    }
-    await c.execute({ sql: "INSERT INTO schema_migrations (id, name) VALUES (?, ?)", args: [m.id, m.name] });
+
+  // 跨实例互斥：advisory lock 由数据库会话持有，
+  // 拿不到锁就阻塞等待，确保同一时刻只有一个执行者。
+  // pg_advisory_lock 在会话结束时自动释放，即使进程崩溃也不会永久占锁。
+  let locked = false;
+  try {
+    await c.execute({ sql: "SELECT pg_advisory_lock(?)", args: [MIGRATION_LOCK_ID] });
+    locked = true;
+  } catch {
+    // 不支持 advisory lock 的环境（如某些代理/内存库）降级为仅进程内互斥
   }
-  applied = true;
+
+  try {
+    await c.execute(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      id INTEGER PRIMARY KEY, name TEXT, applied_at TIMESTAMPTZ DEFAULT now()
+    )`);
+    const rs = await c.execute("SELECT id FROM schema_migrations");
+    const done = new Set(rs.rows.map((r) => Number(r.id)));
+
+    for (const m of MIGRATIONS) {
+      if (done.has(m.id)) continue;
+      for (const stmt of m.sql.split(";").map((s) => s.trim()).filter(Boolean)) {
+        await c.execute(stmt);
+      }
+      await c.execute({ sql: "INSERT INTO schema_migrations (id, name) VALUES (?, ?)", args: [m.id, m.name] });
+    }
+
+    // 只有全部成功才标记已完成；中途抛错时 applied 保持 false，下次会重试
+    applied = true;
+  } finally {
+    if (locked) {
+      await c.execute({ sql: "SELECT pg_advisory_unlock(?)", args: [MIGRATION_LOCK_ID] }).catch(() => {});
+    }
+  }
 }

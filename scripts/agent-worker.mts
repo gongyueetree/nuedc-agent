@@ -26,10 +26,16 @@ const WORKER_ID = process.env.WORKER_ID || `${hostname()}:${process.pid}`;
 const HEAVY_SLOTS = Number(process.env.WORKER_HEAVY_SLOTS || 2);
 const LIGHT_SLOTS = Number(process.env.WORKER_LIGHT_SLOTS || 6);
 const POLL_MS = Number(process.env.WORKER_POLL_MS || 1500);
+/** 是否允许 Worker 自行执行 DDL。生产默认关闭：
+ *  迁移应由部署流程统一执行，避免多个 Worker 实例在生产库上并发跑 DDL，
+ *  也避免 Worker 因权限过大而在 schema 不一致时做出意外变更。 */
+const AUTO_MIGRATE = process.env.WORKER_AUTO_MIGRATE === "1";
 
 let shuttingDown = false;
 let inFlight = 0;
 let consecutiveFailures = 0;
+/** 当前是否因 schema 不兼容而待命（在 readiness 中暴露） */
+let schemaWaiting = false;
 const MAX_CONSECUTIVE_FAILURES = Number(process.env.WORKER_MAX_CONSECUTIVE_FAILURES || 10);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -159,6 +165,7 @@ async function waitForSchema(): Promise<void> {
 
     if (!missing.length) {
       if (warned) log("✓ 数据库 schema 已就绪，恢复正常工作");
+      schemaWaiting = false;
       return;
     }
 
@@ -167,18 +174,24 @@ async function waitForSchema(): Promise<void> {
       log(`❌ agent_tasks 缺少列：${missing.join(", ")}`);
       log("   数据库 schema 落后于当前 Worker 版本，暂不认领任务。");
       log("   修复方式：对同一个库执行 DATABASE_URL=... npm run db:init");
-      log(`   本进程将每 ${RECHECK_MS / 1000}s 自动重试，迁移完成后无需重启容器。`);
+      log(AUTO_MIGRATE
+        ? `   WORKER_AUTO_MIGRATE=1，本进程将每 ${RECHECK_MS / 1000}s 自行尝试迁移。`
+        : `   WORKER_AUTO_MIGRATE 未开启，本进程只做周期检查、不执行 DDL；` +
+          `每 ${RECHECK_MS / 1000}s 重查一次，迁移完成后自动恢复，无需重启容器。`);
       warned = true;
     } else if (++rounds % 10 === 0) {
       log(`仍在等待 schema 就绪（缺 ${missing.length} 列，已等待 ${Math.round(rounds * RECHECK_MS / 60000)} 分钟）`);
     }
 
     await bumpWorkerMetric(WORKER_ID, "schema_mismatch", `missing: ${missing.join(",")}`);
+    schemaWaiting = true;
 
-    // 强制重跑迁移：ensureSchema 有进程内缓存，不加 force 会直接 return 空转，
-    // 导致运维补跑迁移后 Worker 依然看不到新列
-    try { await ensureSchema({ force: true }); } catch (e: any) {
-      log(`  迁移重试失败：${String(e?.message || e).slice(0, 140)}`);
+    if (AUTO_MIGRATE) {
+      // 显式授权后才执行 DDL。force 绕过进程内缓存，
+      // 跨实例仍由 advisory lock 保证同一时刻只有一个执行者
+      try { await ensureSchema({ force: true }); } catch (e: any) {
+        log(`  迁移重试失败：${String(e?.message || e).slice(0, 140)}`);
+      }
     }
     await sleep(RECHECK_MS);
   }
@@ -190,6 +203,7 @@ async function aliveLoop() {
   const report = () => reportWorkerAlive({
     workerId: WORKER_ID, heavySlots: HEAVY_SLOTS, lightSlots: LIGHT_SLOTS,
     inFlight, driver: dbDriver(),
+    schemaWaiting, autoMigrate: AUTO_MIGRATE,
   });
   await report();   // 启动即上报一次，缩短 CI 等待
   while (!shuttingDown) {
@@ -202,8 +216,10 @@ async function aliveLoop() {
 async function reclaimLoop() {
   while (!shuttingDown) {
     try {
-      const { requeued, dead } = await reclaimExpired();
-      if (requeued || dead) log(`回收：${requeued} 个重新入队，${dead} 个进入死信`);
+      const { requeued, dead, batches } = await reclaimExpired();
+      if (requeued || dead) {
+        log(`回收：${requeued} 个重新入队，${dead} 个进入死信（${batches} 批）`);
+      }
     } catch (e: any) {
       await bumpWorkerMetric(WORKER_ID, "reclaim_db_errors", String(e?.message || e));
       log("回收循环异常:", String(e?.message || e).slice(0, 120));
@@ -277,7 +293,7 @@ async function main() {
   // 每秒重启一次、日志刷屏、平台标记 Crashed，且问题本身并不会因重启好转。
   // 这里改为待命重试：定期重查，运维跑完迁移后自动恢复，无需人工重启容器。
   await waitForSchema();
-  log(`启动：重型槽位 ${HEAVY_SLOTS} · 轻型槽位 ${LIGHT_SLOTS} · 轮询 ${POLL_MS}ms · 驱动 ${dbDriver()}`);
+  log(`启动：重型槽位 ${HEAVY_SLOTS} · 轻型槽位 ${LIGHT_SLOTS} · 轮询 ${POLL_MS}ms · 驱动 ${dbDriver()} · 自动迁移 ${AUTO_MIGRATE ? "开" : "关"}`);
 
   const shutdown = async (sig: string) => {
     if (shuttingDown) { log(`再次收到 ${sig}，强制退出`); process.exit(130); }

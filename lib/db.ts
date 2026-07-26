@@ -186,9 +186,7 @@ export async function closeDb(): Promise<void> {
   _txPoolKind = null;
 }
 
-import { ensureMigrations, resetMigrationCache } from "./migrations";
-
-export { resetMigrationCache };
+import { ensureMigrations } from "./migrations";
 
 export { SCHEMA_SQL } from "./schema-sql";
 

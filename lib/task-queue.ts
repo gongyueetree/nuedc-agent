@@ -67,40 +67,64 @@ export async function heartbeat(taskId: string, workerId: string): Promise<boole
 }
 
 /** 回收失联任务：租约过期的 running 任务重新入队；超过重试上限进死信。 */
-export async function reclaimExpired(): Promise<{ requeued: number; dead: number }> {
+/** 单批回收上限。积压几千条时一次性处理会形成超长事务，
+ *  长时间持锁阻塞正常认领，还可能撑爆 WAL。 */
+export const RECLAIM_BATCH_SIZE = Number(process.env.RECLAIM_BATCH_SIZE || 200);
+const RECLAIM_MAX_BATCHES = 50;   // 单轮最多处理 batch × 50，避免回收循环卡死
+
+export async function reclaimExpired(): Promise<{ requeued: number; dead: number; batches: number }> {
   await ensureSchema();
 
-  // 死信标记与配额返还必须同一事务：
-  // 分开执行时，标记成功但退款失败会留下「任务已 dead 但配额仍 reserved」，
-  // 用户额度被永久占用。数据库异常也不再吞成 0 —— 那会让回收循环
-  // 看起来"什么都没做"，掩盖真正的故障。
-  return withTransaction(async (tx) => {
-    const requeue = await tx.execute({
-      sql: `UPDATE agent_tasks SET status='queued', worker_id=NULL, lease_expires_at=NULL,
-              scheduled_at = now() + interval '5 seconds', updated_at=now()
-            WHERE status='running' AND lease_expires_at < now()
-              AND attempts < max_attempts
-            RETURNING task_id`,
-      args: [],
-    });
+  let requeued = 0;
+  let dead = 0;
+  let batches = 0;
 
-    const dead = await tx.execute({
-      sql: `UPDATE agent_tasks SET status='dead', worker_id=NULL, lease_expires_at=NULL,
-              dead_reason='Worker 失联且已达最大重试次数', completed_at=now(), updated_at=now()
-            WHERE status='running' AND lease_expires_at < now() AND attempts >= max_attempts
-            RETURNING task_id, owner_ref, quota_ref, quota_kind`,
-      args: [],
-    });
+  // 分批处理：每批一个短事务。
+  // FOR UPDATE SKIP LOCKED 让多个 Worker 的回收循环可以并行分担，互不阻塞。
+  for (; batches < RECLAIM_MAX_BATCHES; batches++) {
+    const done = await withTransaction(async (tx) => {
+      const requeueRows = await tx.execute({
+        sql: `UPDATE agent_tasks SET status='queued', worker_id=NULL, lease_expires_at=NULL,
+                scheduled_at = now() + interval '5 seconds', updated_at=now()
+              WHERE task_id IN (
+                SELECT task_id FROM agent_tasks
+                WHERE status='running' AND lease_expires_at < now() AND attempts < max_attempts
+                ORDER BY lease_expires_at
+                LIMIT ? FOR UPDATE SKIP LOCKED
+              )
+              RETURNING task_id`,
+        args: [RECLAIM_BATCH_SIZE],
+      });
 
-    // 在同一事务内返还：任一笔失败则整批回滚，任务状态与配额一起恢复
-    for (const r of dead.rows as any[]) {
-      if (r.quota_ref && r.owner_ref && r.quota_kind) {
-        await refundQuota(String(r.owner_ref), String(r.quota_kind), String(r.quota_ref), tx);
+      const deadRows = await tx.execute({
+        sql: `UPDATE agent_tasks SET status='dead', worker_id=NULL, lease_expires_at=NULL,
+                dead_reason='Worker 失联且已达最大重试次数', completed_at=now(), updated_at=now()
+              WHERE task_id IN (
+                SELECT task_id FROM agent_tasks
+                WHERE status='running' AND lease_expires_at < now() AND attempts >= max_attempts
+                ORDER BY lease_expires_at
+                LIMIT ? FOR UPDATE SKIP LOCKED
+              )
+              RETURNING task_id, owner_ref, quota_ref, quota_kind`,
+        args: [RECLAIM_BATCH_SIZE],
+      });
+
+      // 同事务内返还：任一笔失败则本批整体回滚，不会出现「已 dead 但配额仍 reserved」
+      for (const r of deadRows.rows as any[]) {
+        if (r.quota_ref && r.owner_ref && r.quota_kind) {
+          await refundQuota(String(r.owner_ref), String(r.quota_kind), String(r.quota_ref), tx);
+        }
       }
-    }
 
-    return { requeued: requeue.rows.length, dead: dead.rows.length };
-  });
+      requeued += requeueRows.rows.length;
+      dead += deadRows.rows.length;
+      return requeueRows.rows.length + deadRows.rows.length;
+    });
+
+    if (done === 0) break;   // 本轮已清空
+  }
+
+  return { requeued, dead, batches };
 }
 
 /** 任务完成：写结果 + 结算配额。
@@ -236,18 +260,22 @@ export const WORKER_LIVE_WINDOW_SEC = 60;
 /** Worker 定期上报存活。与任务心跳不同：这是「进程还在」的证明，
  *  即使当前没有任务在跑也要上报，否则 readiness 会误判无可用 Worker。 */
 export async function reportWorkerAlive(info: {
-  workerId: string; heavySlots: number; lightSlots: number; inFlight: number; driver?: string;
+  workerId: string; heavySlots: number; lightSlots: number; inFlight: number;
+  driver?: string; schemaWaiting?: boolean; autoMigrate?: boolean;
 }): Promise<void> {
   try {
     await ensureSchema();
     await db().execute({
-      sql: `INSERT INTO worker_heartbeats (worker_id, started_at, last_seen, heavy_slots, light_slots, in_flight, driver)
-            VALUES (?, now(), now(), ?, ?, ?, ?)
+      sql: `INSERT INTO worker_heartbeats (worker_id, started_at, last_seen, heavy_slots, light_slots,
+              in_flight, driver, schema_waiting, auto_migrate)
+            VALUES (?, now(), now(), ?, ?, ?, ?, ?, ?)
             ON CONFLICT (worker_id) DO UPDATE SET
               last_seen = now(), heavy_slots = EXCLUDED.heavy_slots,
               light_slots = EXCLUDED.light_slots, in_flight = EXCLUDED.in_flight,
-              driver = EXCLUDED.driver`,
-      args: [info.workerId, info.heavySlots, info.lightSlots, info.inFlight, info.driver ?? null],
+              driver = EXCLUDED.driver, schema_waiting = EXCLUDED.schema_waiting,
+              auto_migrate = EXCLUDED.auto_migrate`,
+      args: [info.workerId, info.heavySlots, info.lightSlots, info.inFlight, info.driver ?? null,
+        info.schemaWaiting ? 1 : 0, info.autoMigrate ? 1 : 0],
     });
   } catch { /* 心跳失败不影响任务执行 */ }
 }
@@ -262,7 +290,13 @@ export interface WorkerStatus {
   total: number;
   capacity: { heavy: number; light: number };
   inFlight: number;
-  workers: { worker_id: string; last_seen: string; in_flight: number; stale: boolean }[];
+  /** 因 schema 不兼容而待命的 Worker 数 —— 它们存活但不认领任务 */
+  schemaWaiting: number;
+  autoMigrateEnabled: boolean;
+  workers: {
+    worker_id: string; last_seen: string; in_flight: number;
+    schema_waiting: boolean; auto_migrate: boolean; stale: boolean;
+  }[];
 }
 
 /** 当前存活的 Worker 概览。live 是判断「任务能不能被消费」的唯一依据。 */
@@ -270,6 +304,8 @@ export async function workerStatus(): Promise<WorkerStatus> {
   await ensureSchema();
   const rs = await db().execute({
     sql: `SELECT worker_id, last_seen, heavy_slots, light_slots, in_flight,
+            COALESCE(schema_waiting, 0) AS schema_waiting,
+            COALESCE(auto_migrate, 0) AS auto_migrate,
             (last_seen < now() - interval '${WORKER_LIVE_WINDOW_SEC} seconds') AS stale
           FROM worker_heartbeats ORDER BY last_seen DESC`,
     args: [],
@@ -284,10 +320,15 @@ export async function workerStatus(): Promise<WorkerStatus> {
       light: alive.reduce((a, r) => a + Number(r.light_slots || 0), 0),
     },
     inFlight: alive.reduce((a, r) => a + Number(r.in_flight || 0), 0),
+    // 因 schema 不兼容而待命的 Worker 不计入可用容量
+    schemaWaiting: alive.filter((r) => Number(r.schema_waiting) === 1).length,
+    autoMigrateEnabled: alive.some((r) => Number(r.auto_migrate) === 1),
     workers: rows.map((r) => ({
       worker_id: String(r.worker_id),
       last_seen: String(r.last_seen),
       in_flight: Number(r.in_flight || 0),
+      schema_waiting: Number(r.schema_waiting) === 1,
+      auto_migrate: Number(r.auto_migrate) === 1,
       stale: !!r.stale,
     })),
   };

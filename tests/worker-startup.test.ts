@@ -137,7 +137,7 @@ describe("崩溃循环防护", () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
     expect(src).toContain("async function waitForSchema");
-    expect(src).toContain("迁移完成后无需重启容器");
+    expect(src).toContain("自动恢复，无需重启容器");
     // 待命循环内不得有 process.exit
     const fn = src.slice(src.indexOf("async function waitForSchema"), src.indexOf("/** 存活上报循环"));
     expect(fn).not.toContain("process.exit");
@@ -149,6 +149,7 @@ describe("崩溃循环防护", () => {
     const fn = src.slice(src.indexOf("async function waitForSchema"), src.indexOf("/** 存活上报循环"));
     expect(fn).toContain("ensureSchema({ force: true })");
     expect(fn).toContain("恢复正常工作");
+    expect(fn).toContain("AUTO_MIGRATE");
   });
 
   it("日志不刷屏：首次告警后按轮次降频", async () => {
@@ -180,7 +181,7 @@ describe("待命自愈的有效性", () => {
     const fn = src.slice(src.indexOf("async function waitForSchema"), src.indexOf("/** 存活上报循环"));
     // 不加 force 时 ensureSchema 因 applied 标志直接 return，待命循环会空转
     expect(fn).toContain("ensureSchema({ force: true })");
-    expect(fn).toContain("会直接 return 空转");
+    expect(fn).toContain("跨实例仍由 advisory lock");
   });
 
   it("ensureMigrations 支持 force 与缓存重置", async () => {

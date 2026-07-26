@@ -371,7 +371,7 @@ describe("迁移不可变性（防止已发布迁移被追加内容）", () => {
     expect(src).toContain("information_schema.columns");
     // 立即 exit(1) 会与编排平台重启策略形成崩溃循环，改为待命重试
     expect(src).toContain("waitForSchema");
-    expect(src).toContain("迁移完成后无需重启容器");
+    expect(src).toContain("自动恢复，无需重启容器");
   });
 });
 
@@ -406,7 +406,10 @@ describe("配额路径原子性（本轮审查）", () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("lib/task-queue.ts", "utf8");
     const fn = src.slice(src.indexOf("export async function reclaimExpired"), src.indexOf("/** 任务完成：写结果"));
-    expect(fn).toContain("return withTransaction");
+    // 分批处理：每批一个短事务，避免积压时形成超长事务
+    expect(fn).toContain("withTransaction");
+    expect(fn).toContain("RECLAIM_BATCH_SIZE");
+    expect(fn).toContain("FOR UPDATE SKIP LOCKED");
     expect(fn).toContain("refundQuota(String(r.owner_ref), String(r.quota_kind), String(r.quota_ref), tx)");
     // 异常不得被吞成 0
     expect(fn).not.toMatch(/\.catch\(\(\) => \(\{ rows: \[\]/);
