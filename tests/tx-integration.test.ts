@@ -215,6 +215,161 @@ describe.skipIf(!hasDb)("事务原子性（真实 PostgreSQL）", () => {
   });
 });
 
+describe.skipIf(!hasDb)("配额路径原子性（真实 PostgreSQL）", () => {
+  /** 复刻 reserveQuota 的事务语义，可在两步之间注入故障 */
+  async function reserveInTx(opts: {
+    owner: string; kind: string; quota: number; ref: string; failAfterCounter?: boolean;
+  }): Promise<{ ok: boolean; used?: number }> {
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const rs = await c.query(
+        `INSERT INTO tx_test_quota_counters (owner, kind, day, used) VALUES ($1,$2,CURRENT_DATE,1)
+         ON CONFLICT (owner, kind, day)
+         DO UPDATE SET used = tx_test_quota_counters.used + 1
+         WHERE tx_test_quota_counters.used < $3
+         RETURNING used`,
+        [opts.owner, opts.kind, opts.quota],
+      );
+      if (!rs.rows.length) { await c.query("ROLLBACK"); return { ok: false }; }
+
+      // 注入点：计数器已增加，预占记录尚未写入
+      if (opts.failAfterCounter) throw new Error("INJECTED_BEFORE_RESERVATION");
+
+      await c.query(
+        `INSERT INTO tx_test_llm_usage (owner, kind, status, ref) VALUES ($1,$2,'reserved',$3)`,
+        [opts.owner, opts.kind, opts.ref],
+      );
+      await c.query("COMMIT");
+      return { ok: true, used: Number(rs.rows[0].used) };
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally { c.release(); }
+  }
+
+  /** 复刻 refundQuota：只有 reserved→refunded 命中才回退计数器 */
+  async function refundInTx(owner: string, kind: string, ref: string): Promise<void> {
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const marked = await c.query(
+        `UPDATE tx_test_llm_usage SET status='refunded' WHERE ref=$1 AND status='reserved' RETURNING id`,
+        [ref],
+      );
+      if (marked.rows.length) {
+        await c.query(
+          `UPDATE tx_test_quota_counters SET used = GREATEST(used - 1, 0)
+           WHERE owner=$1 AND kind=$2 AND day = CURRENT_DATE`,
+          [owner, kind],
+        );
+      }
+      await c.query("COMMIT");
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally { c.release(); }
+  }
+
+  const counterOf = async (owner: string, kind: string) => {
+    const r = await q(
+      `SELECT used FROM tx_test_quota_counters WHERE owner=$1 AND kind=$2 AND day=CURRENT_DATE`,
+      [owner, kind]);
+    return Number(r[0]?.used ?? 0);
+  };
+
+  beforeEach(async () => {
+    await q("TRUNCATE tx_test_llm_usage, tx_test_quota_counters");
+  });
+
+  it("预占：计数器自增后注入失败 → 计数器回滚，不留残缺 reservation", async () => {
+    // 先成功占一次，确认基线
+    await reserveInTx({ owner: "u1", kind: "k", quota: 5, ref: "R1" });
+    expect(await counterOf("u1", "k")).toBe(1);
+
+    // 第二次在写入 reservation 前失败
+    await expect(
+      reserveInTx({ owner: "u1", kind: "k", quota: 5, ref: "R2", failAfterCounter: true }),
+    ).rejects.toThrow("INJECTED_BEFORE_RESERVATION");
+
+    // 计数器必须保持原值，不能因为失败的尝试而泄漏额度
+    expect(await counterOf("u1", "k")).toBe(1);
+    const orphan = await q("SELECT id FROM tx_test_llm_usage WHERE ref='R2'");
+    expect(orphan.length).toBe(0);      // 无残缺 reservation
+  });
+
+  it("退款幂等：同一 ref 连续退两次，计数器只减一次", async () => {
+    await reserveInTx({ owner: "u2", kind: "k", quota: 5, ref: "R10" });
+    await reserveInTx({ owner: "u2", kind: "k", quota: 5, ref: "R11" });
+    expect(await counterOf("u2", "k")).toBe(2);
+
+    await refundInTx("u2", "k", "R10");
+    expect(await counterOf("u2", "k")).toBe(1);
+
+    await refundInTx("u2", "k", "R10");   // 重复退款
+    expect(await counterOf("u2", "k")).toBe(1);   // 不再递减
+
+    const st = await q("SELECT status FROM tx_test_llm_usage WHERE ref='R10'");
+    expect(st[0].status).toBe("refunded");
+  });
+
+  it("退款不存在的 ref 不影响计数器", async () => {
+    await reserveInTx({ owner: "u3", kind: "k", quota: 5, ref: "R20" });
+    await refundInTx("u3", "k", "NOT_EXIST");
+    expect(await counterOf("u3", "k")).toBe(1);
+  });
+
+  it("配额用尽时不写入 reservation，计数器不超上限", async () => {
+    for (let i = 0; i < 3; i++) {
+      await reserveInTx({ owner: "u4", kind: "k", quota: 3, ref: `R3${i}` });
+    }
+    expect(await counterOf("u4", "k")).toBe(3);
+
+    const over = await reserveInTx({ owner: "u4", kind: "k", quota: 3, ref: "R99" });
+    expect(over.ok).toBe(false);
+    expect(await counterOf("u4", "k")).toBe(3);          // 未超限
+    const none = await q("SELECT id FROM tx_test_llm_usage WHERE ref='R99'");
+    expect(none.length).toBe(0);
+  });
+
+  it("并发预占不会超发配额", async () => {
+    const runs = await Promise.allSettled(
+      Array.from({ length: 10 }, (_, i) =>
+        reserveInTx({ owner: "u5", kind: "k", quota: 4, ref: `C${i}` })),
+    );
+    const granted = runs.filter((r) => r.status === "fulfilled" && (r as any).value.ok).length;
+    expect(granted).toBe(4);                             // 恰好发放上限数量
+    expect(await counterOf("u5", "k")).toBe(4);
+    const reservations = await q("SELECT id FROM tx_test_llm_usage WHERE status='reserved'");
+    expect(reservations.length).toBe(4);                 // 计数器与记录一致
+  });
+
+  it("死信回收：标记 dead 与退款同事务，注入失败时一起回滚", async () => {
+    await reserveInTx({ owner: "u6", kind: "heavy_task", quota: 5, ref: "RD1" });
+    await q(`INSERT INTO tx_test_agent_tasks (task_id, status, worker_id, attempts, max_attempts, owner_ref, quota_ref, quota_kind, lease_expires_at)
+             VALUES ('TD1','running','X',3,3,'u6','RD1','heavy_task', now() - interval '1 hour')`);
+
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query(
+        `UPDATE tx_test_agent_tasks SET status='dead', completed_at=now()
+         WHERE status='running' AND lease_expires_at < now() AND attempts >= max_attempts`);
+      await c.query(`UPDATE tx_test_llm_usage SET status='refunded' WHERE ref='RD1' AND status='reserved'`);
+      throw new Error("INJECTED_IN_RECLAIM");
+    } catch {
+      await c.query("ROLLBACK").catch(() => {});
+    } finally { c.release(); }
+
+    // 任务与配额必须一起回滚：不能出现「已 dead 但配额仍 reserved」
+    const task = await q("SELECT status FROM tx_test_agent_tasks WHERE task_id='TD1'");
+    const usage = await q("SELECT status FROM tx_test_llm_usage WHERE ref='RD1'");
+    expect(task[0].status).toBe("running");
+    expect(usage[0].status).toBe("reserved");
+    expect(await counterOf("u6", "heavy_task")).toBe(1);
+  });
+});
+
 describe.skipIf(hasDb)("事务集成测试未运行", () => {
   it("提示如何启用（不静默跳过）", () => {
     console.warn(

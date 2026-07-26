@@ -53,44 +53,54 @@ export async function claimTask(workerId: string, opts: { heavy?: boolean } = {}
   return (rs.rows[0] as any) || null;
 }
 
-/** 心跳续租。返回 false 表示任务已被回收（Worker 应放弃继续写结果）。 */
+/** 心跳续租。返回 false 表示租约已失效（任务被回收或已终态）。
+ *  数据库异常向上抛出而不是当成 false —— 二者含义完全不同：
+ *  租约失效意味着结果作废，数据库抖动只需重试，混为一谈会丢弃有效结果。 */
 export async function heartbeat(taskId: string, workerId: string): Promise<boolean> {
   const rs = await db().execute({
     sql: `UPDATE agent_tasks SET heartbeat_at = now(),
             lease_expires_at = now() + interval '${LEASE_MS} milliseconds', updated_at = now()
           WHERE task_id=? AND worker_id=? AND status='running' RETURNING task_id`,
     args: [taskId, workerId],
-  }).catch(() => ({ rows: [] as any[] }));
+  });
   return rs.rows.length > 0;
 }
 
 /** 回收失联任务：租约过期的 running 任务重新入队；超过重试上限进死信。 */
 export async function reclaimExpired(): Promise<{ requeued: number; dead: number }> {
   await ensureSchema();
-  const requeue = await db().execute({
-    sql: `UPDATE agent_tasks SET status='queued', worker_id=NULL, lease_expires_at=NULL,
-            scheduled_at = now() + interval '5 seconds', updated_at=now()
-          WHERE status='running' AND lease_expires_at < now()
-            AND attempts < max_attempts
-          RETURNING task_id`,
-    args: [],
-  }).catch(() => ({ rows: [] as any[] }));
 
-  const dead = await db().execute({
-    sql: `UPDATE agent_tasks SET status='dead', worker_id=NULL, lease_expires_at=NULL,
-            dead_reason='Worker 失联且已达最大重试次数', completed_at=now(), updated_at=now()
-          WHERE status='running' AND lease_expires_at < now() AND attempts >= max_attempts
-          RETURNING task_id, owner_ref, quota_ref, quota_kind`,
-    args: [],
-  }).catch(() => ({ rows: [] as any[] }));
+  // 死信标记与配额返还必须同一事务：
+  // 分开执行时，标记成功但退款失败会留下「任务已 dead 但配额仍 reserved」，
+  // 用户额度被永久占用。数据库异常也不再吞成 0 —— 那会让回收循环
+  // 看起来"什么都没做"，掩盖真正的故障。
+  return withTransaction(async (tx) => {
+    const requeue = await tx.execute({
+      sql: `UPDATE agent_tasks SET status='queued', worker_id=NULL, lease_expires_at=NULL,
+              scheduled_at = now() + interval '5 seconds', updated_at=now()
+            WHERE status='running' AND lease_expires_at < now()
+              AND attempts < max_attempts
+            RETURNING task_id`,
+      args: [],
+    });
 
-  // 死信任务返还未完成的配额预占
-  for (const r of dead.rows as any[]) {
-    if (r.quota_ref && r.owner_ref && r.quota_kind) {
-      await refundQuota(String(r.owner_ref), String(r.quota_kind), String(r.quota_ref));
+    const dead = await tx.execute({
+      sql: `UPDATE agent_tasks SET status='dead', worker_id=NULL, lease_expires_at=NULL,
+              dead_reason='Worker 失联且已达最大重试次数', completed_at=now(), updated_at=now()
+            WHERE status='running' AND lease_expires_at < now() AND attempts >= max_attempts
+            RETURNING task_id, owner_ref, quota_ref, quota_kind`,
+      args: [],
+    });
+
+    // 在同一事务内返还：任一笔失败则整批回滚，任务状态与配额一起恢复
+    for (const r of dead.rows as any[]) {
+      if (r.quota_ref && r.owner_ref && r.quota_kind) {
+        await refundQuota(String(r.owner_ref), String(r.quota_kind), String(r.quota_ref), tx);
+      }
     }
-  }
-  return { requeued: requeue.rows.length, dead: dead.rows.length };
+
+    return { requeued: requeue.rows.length, dead: dead.rows.length };
+  });
 }
 
 /** 任务完成：写结果 + 结算配额。

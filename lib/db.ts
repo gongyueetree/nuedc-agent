@@ -40,14 +40,12 @@ function conn(): { driver: Driver; client: any } {
   if (_driver === "neon") {
     _client = neon(url);
   } else {
-    // 延迟 require：Vercel 环境不需要 pg，避免打包体积与冷启动开销
-    const { Pool } = require("pg");
+    const { Pool } = require("pg");   // 延迟 require：Vercel 上普通查询走 neon HTTP，无需打包 pg
     _client = new Pool({
       connectionString: url,
       max: Number(process.env.PG_POOL_MAX || 10),
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
-      // 自建/CI 的本地库通常无 TLS；云托管一般要求 TLS
       ssl: /sslmode=require/.test(url) ? { rejectUnauthorized: false } : undefined,
     });
   }

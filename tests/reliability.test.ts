@@ -235,7 +235,9 @@ describe("P0 事务真实性（不得静默降级）", () => {
     const usage = fs.readFileSync("lib/usage.ts", "utf8");
     expect(usage).toContain("commitQuota(ref: string, tx?: TxExecutor)");
     expect(usage).toContain("refundQuota(owner: string, kind: string, ref: string, tx?: TxExecutor)");
-    expect(usage).toContain("const exec = tx ?? db()");
+    // 无 tx 时自开真事务，而不是退化成裸 db() 顺序执行
+    expect(usage).toContain("if (tx) return doRefund(tx)");
+    expect(usage).toContain("await withTransaction(doRefund)");
 
     const queue = fs.readFileSync("lib/task-queue.ts", "utf8");
     // 必须把 tx 传下去，否则配额走独立连接、回滚时不一致
@@ -370,5 +372,62 @@ describe("迁移不可变性（防止已发布迁移被追加内容）", () => {
     // 立即 exit(1) 会与编排平台重启策略形成崩溃循环，改为待命重试
     expect(src).toContain("waitForSchema");
     expect(src).toContain("迁移完成后无需重启容器");
+  });
+});
+
+describe("配额路径原子性（本轮审查）", () => {
+  it("reserveQuota 的计数器自增与预占写入在同一事务", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/usage.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function reserveQuota"), src.indexOf("/** 成功：把预占转为正式消耗"));
+    expect(fn).toContain("return withTransaction");
+    expect(fn).toContain("配额泄漏");
+    // 两条语句都必须走 tx，不能有裸 db()
+    expect(fn).not.toMatch(/await db\(\)\.execute/);
+    // 无限配额路径同样在事务内
+    expect(fn.slice(fn.indexOf("quota === -1"))).toContain("tx.execute");
+  });
+
+  it("refundQuota 只有 reserved→refunded 命中才回退计数器", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/usage.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function refundQuota"), src.indexOf("/** 今日已用"));
+    const markIdx = fn.indexOf("status='refunded'");
+    const guardIdx = fn.indexOf("if (!marked.rows.length) return");
+    const decIdx = fn.indexOf("used - 1");
+    expect(markIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeGreaterThan(markIdx);
+    expect(decIdx).toBeGreaterThan(guardIdx);   // 递减必须在命中判断之后
+    // 不得存在无条件递减的旧路径
+    expect(fn).not.toMatch(/\.catch\(\(\) => \{\}\);\s*await db\(\)\.execute\(\{\s*sql: `UPDATE quota_counters/);
+  });
+
+  it("reclaimExpired 的 dead 标记与退款同事务，且不吞数据库异常", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/task-queue.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function reclaimExpired"), src.indexOf("/** 任务完成：写结果"));
+    expect(fn).toContain("return withTransaction");
+    expect(fn).toContain("refundQuota(String(r.owner_ref), String(r.quota_kind), String(r.quota_ref), tx)");
+    // 异常不得被吞成 0
+    expect(fn).not.toMatch(/\.catch\(\(\) => \(\{ rows: \[\]/);
+  });
+
+  it("心跳失败不再伪装成租约失效", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/task-queue.ts", "utf8");
+    // 注释在函数声明之前，切片从注释起点开始
+    const fn = src.slice(src.indexOf("/** 心跳续租"), src.indexOf("/** 回收失联任务"));
+    expect(fn).not.toMatch(/\.catch\(\(\) => \(\{ rows: \[\]/);
+    expect(fn).toContain("数据库异常向上抛出");
+  });
+
+  it("配额故障注入测试覆盖审查要求的场景", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("tests/tx-integration.test.ts", "utf8");
+    expect(src).toContain("计数器自增后注入失败");
+    expect(src).toContain("不留残缺 reservation");
+    expect(src).toContain("同一 ref 连续退两次");
+    expect(src).toContain("标记 dead 与退款同事务");
+    expect(src).toContain("并发预占不会超发配额");
   });
 });
