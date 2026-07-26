@@ -295,3 +295,35 @@ describe("P1 .DS_Store 清理", () => {
     expect(fs.readFileSync(".gitignore", "utf8")).toContain(".DS_Store");
   });
 });
+
+describe("迁移健壮性与测试隔离", () => {
+  it("集成测试使用独立表名，不占用生产表名", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("tests/tx-integration.test.ts", "utf8");
+    expect(src).toContain("tx_test_agent_tasks");
+    // 不得用 CREATE TABLE IF NOT EXISTS 占住生产表名 ——
+    // 那会让后续 ensureSchema 跳过建表、迁移引用缺失列而失败
+    expect(src).not.toMatch(/CREATE TABLE IF NOT EXISTS agent_tasks\b/);
+    expect(src).not.toMatch(/CREATE TABLE IF NOT EXISTS llm_usage\b/);
+    expect(src).toContain("DROP TABLE IF EXISTS tx_test_");
+  });
+
+  it("agent_tasks 迁移在建索引前补齐关键列（结构不完整时可自愈）", async () => {
+    const { MIGRATIONS } = await import("../lib/migrations");
+    const m = (MIGRATIONS as any[]).find((x) => x.sql.includes("idx_tasks_project"));
+    expect(m).toBeTruthy();
+    const addIdx = m.sql.indexOf("ADD COLUMN IF NOT EXISTS project_id");
+    const useIdx = m.sql.indexOf("idx_tasks_project");
+    expect(addIdx).toBeGreaterThan(-1);
+    expect(addIdx).toBeLessThan(useIdx);      // 补列必须在建索引之前
+  });
+
+  it("CI 在 Worker 冒烟前先跑迁移", async () => {
+    const fs = await import("node:fs");
+    const ci = fs.readFileSync(".github/workflows/ci.yml", "utf8");
+    const migIdx = ci.indexOf("Migrate before worker smoke");
+    const smokeIdx = ci.indexOf("Worker startup smoke");
+    expect(migIdx).toBeGreaterThan(-1);
+    expect(migIdx).toBeLessThan(smokeIdx);
+  });
+});

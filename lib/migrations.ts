@@ -90,6 +90,23 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
+-- 防御：若 agent_tasks 因历史原因已存在但缺列，CREATE TABLE IF NOT EXISTS 会跳过，
+-- 后续建索引会因列不存在而失败。显式补列使迁移可自愈。
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS project_id TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS agent_type TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'queued';
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS input TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS output TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS error TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS tier TEXT DEFAULT 'free';
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS max_attempts INTEGER DEFAULT 3;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS cancel_requested INTEGER DEFAULT 0;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS last_run_id TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS model TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON agent_tasks(project_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idem ON agent_tasks(idempotency_key) WHERE idempotency_key IS NOT NULL;
 `,

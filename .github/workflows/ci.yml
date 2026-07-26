@@ -88,6 +88,13 @@ jobs:
         run: npm run verify:docx
 
       # Worker 起不来就红灯：这类问题单测全绿也照样发生
+      # Worker 启动会执行 ensureSchema，需要完整 schema 才能通过。
+      # 先跑迁移，避免依赖前面步骤留下的表结构。
+      - name: Migrate before worker smoke
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/nuedc_ci
+        run: npm run db:init
+
       - name: Worker startup smoke (blocking)
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/nuedc_ci

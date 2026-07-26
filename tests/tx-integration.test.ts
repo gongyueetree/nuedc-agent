@@ -2,6 +2,10 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 
 /** 真实 PostgreSQL 集成测试：验证任务状态转换与配额结算的事务原子性。
  *
+ *  表名必须带 tx_test_ 前缀：CI 中本测试与 Worker 冒烟共用同一个数据库，
+ *  若用生产表名，CREATE TABLE IF NOT EXISTS 会用简化结构占住表，
+ *  导致后续 ensureSchema 跳过建表、迁移引用不存在的列而失败。
+ *
  *  这些场景在 mock 或内存数据库上验证不了 —— 需要真的 BEGIN/COMMIT/ROLLBACK：
  *  - 租约丢失后不得结算
  *  - 事务中途失败必须同时回滚任务状态与配额状态
@@ -32,7 +36,7 @@ async function settleInTransaction(opts: {
     await c.query("BEGIN");
 
     const upd = await c.query(
-      `UPDATE agent_tasks SET status=$1, completed_at=now(), lease_expires_at=NULL
+      `UPDATE tx_test_agent_tasks SET status=$1, completed_at=now(), lease_expires_at=NULL
        WHERE task_id=$2 AND status='running' AND worker_id=$3
        RETURNING owner_ref, quota_ref, quota_kind`,
       [opts.ok ? "ok" : "dead", opts.taskId, opts.workerId],
@@ -50,17 +54,17 @@ async function settleInTransaction(opts: {
     if (row.quota_ref) {
       if (opts.ok) {
         await c.query(
-          "UPDATE llm_usage SET status='success' WHERE ref=$1 AND status='reserved'",
+          "UPDATE tx_test_llm_usage SET status='success' WHERE ref=$1 AND status='reserved'",
           [row.quota_ref],
         );
       } else {
         const marked = await c.query(
-          "UPDATE llm_usage SET status='refunded' WHERE ref=$1 AND status='reserved' RETURNING id",
+          "UPDATE tx_test_llm_usage SET status='refunded' WHERE ref=$1 AND status='reserved' RETURNING id",
           [row.quota_ref],
         );
         if (marked.rows.length) {
           await c.query(
-            `UPDATE quota_counters SET used = GREATEST(used - 1, 0)
+            `UPDATE tx_test_quota_counters SET used = GREATEST(used - 1, 0)
              WHERE owner=$1 AND kind=$2 AND day = CURRENT_DATE`,
             [row.owner_ref, row.quota_kind],
           );
@@ -86,39 +90,43 @@ describe.skipIf(!hasDb)("事务原子性（真实 PostgreSQL）", () => {
     const pg = await import("pg");
     pool = new pg.default.Pool({ connectionString: TEST_URL, max: 8 });
     await q(`
-      CREATE TABLE IF NOT EXISTS agent_tasks (
+      CREATE TABLE IF NOT EXISTS tx_test_agent_tasks (
         task_id TEXT PRIMARY KEY, status TEXT, worker_id TEXT,
         attempts INT DEFAULT 0, max_attempts INT DEFAULT 3,
         owner_ref TEXT, quota_ref TEXT, quota_kind TEXT,
         lease_expires_at TIMESTAMPTZ, completed_at TIMESTAMPTZ
       )`);
     await q(`
-      CREATE TABLE IF NOT EXISTS llm_usage (
+      CREATE TABLE IF NOT EXISTS tx_test_llm_usage (
         id BIGSERIAL PRIMARY KEY, owner TEXT, kind TEXT,
         detail TEXT, status TEXT, ref TEXT
       )`);
     await q(`
-      CREATE TABLE IF NOT EXISTS quota_counters (
+      CREATE TABLE IF NOT EXISTS tx_test_quota_counters (
         owner TEXT, kind TEXT, day DATE, used INT DEFAULT 0,
         PRIMARY KEY (owner, kind, day)
       )`);
   });
 
-  afterAll(async () => { await pool?.end().catch(() => {}); });
+  afterAll(async () => {
+    // 清理测试表，避免遗留影响同库的其他步骤
+    await q("DROP TABLE IF EXISTS tx_test_agent_tasks, tx_test_llm_usage, tx_test_quota_counters").catch(() => {});
+    await pool?.end().catch(() => {});
+  });
 
   beforeEach(async () => {
-    await q("TRUNCATE agent_tasks, llm_usage, quota_counters");
+    await q("TRUNCATE tx_test_agent_tasks, tx_test_llm_usage, tx_test_quota_counters");
     await q(
-      `INSERT INTO agent_tasks (task_id, status, worker_id, owner_ref, quota_ref, quota_kind)
+      `INSERT INTO tx_test_agent_tasks (task_id, status, worker_id, owner_ref, quota_ref, quota_kind)
        VALUES ('T1','running','A','u1','Q1','heavy_task')`);
-    await q(`INSERT INTO llm_usage (owner, kind, status, ref) VALUES ('u1','heavy_task','reserved','Q1')`);
-    await q(`INSERT INTO quota_counters (owner, kind, day, used) VALUES ('u1','heavy_task',CURRENT_DATE,1)`);
+    await q(`INSERT INTO tx_test_llm_usage (owner, kind, status, ref) VALUES ('u1','heavy_task','reserved','Q1')`);
+    await q(`INSERT INTO tx_test_quota_counters (owner, kind, day, used) VALUES ('u1','heavy_task',CURRENT_DATE,1)`);
   });
 
   const quotaState = async () => {
-    const usage = await q("SELECT status FROM llm_usage WHERE ref='Q1'");
-    const counter = await q("SELECT used FROM quota_counters WHERE owner='u1' AND kind='heavy_task' AND day=CURRENT_DATE");
-    const task = await q("SELECT status, worker_id FROM agent_tasks WHERE task_id='T1'");
+    const usage = await q("SELECT status FROM tx_test_llm_usage WHERE ref='Q1'");
+    const counter = await q("SELECT used FROM tx_test_quota_counters WHERE owner='u1' AND kind='heavy_task' AND day=CURRENT_DATE");
+    const task = await q("SELECT status, worker_id FROM tx_test_agent_tasks WHERE task_id='T1'");
     return {
       usage: usage[0]?.status,
       used: Number(counter[0]?.used ?? -1),
@@ -128,7 +136,7 @@ describe.skipIf(!hasDb)("事务原子性（真实 PostgreSQL）", () => {
 
   it("Worker B 接管后，陈旧的 Worker A 无法结算且收到 lease_lost", async () => {
     // 回收：A 租约过期，B 重新认领
-    await q("UPDATE agent_tasks SET worker_id='B' WHERE task_id='T1'");
+    await q("UPDATE tx_test_agent_tasks SET worker_id='B' WHERE task_id='T1'");
 
     const a = await settleInTransaction({ taskId: "T1", workerId: "A", ok: false });
     expect(a).toBe("lease_lost");
@@ -140,7 +148,7 @@ describe.skipIf(!hasDb)("事务原子性（真实 PostgreSQL）", () => {
   });
 
   it("Worker B 完成后配额恰好结算一次", async () => {
-    await q("UPDATE agent_tasks SET worker_id='B' WHERE task_id='T1'");
+    await q("UPDATE tx_test_agent_tasks SET worker_id='B' WHERE task_id='T1'");
     await settleInTransaction({ taskId: "T1", workerId: "A", ok: false });   // A 失败
 
     const b = await settleInTransaction({ taskId: "T1", workerId: "B", ok: true });
@@ -176,7 +184,7 @@ describe.skipIf(!hasDb)("事务原子性（真实 PostgreSQL）", () => {
   });
 
   it("并发 completeTask / failTask 只产生一次终态转换", async () => {
-    await q("UPDATE agent_tasks SET worker_id='W' WHERE task_id='T1'");
+    await q("UPDATE tx_test_agent_tasks SET worker_id='W' WHERE task_id='T1'");
 
     // 同一 Worker 并发发起成功与失败结算
     const results = await Promise.allSettled([
@@ -192,12 +200,12 @@ describe.skipIf(!hasDb)("事务原子性（真实 PostgreSQL）", () => {
     // 配额只被结算一次（不可能既 success 又 refunded）
     const s = await quotaState();
     expect(["success", "refunded"]).toContain(s.usage);
-    const all = await q("SELECT status FROM llm_usage WHERE ref='Q1'");
+    const all = await q("SELECT status FROM tx_test_llm_usage WHERE ref='Q1'");
     expect(all.length).toBe(1);
   });
 
   it("高并发下终态转换仍只成功一次", async () => {
-    await q("UPDATE agent_tasks SET worker_id='W' WHERE task_id='T1'");
+    await q("UPDATE tx_test_agent_tasks SET worker_id='W' WHERE task_id='T1'");
     const runs = await Promise.allSettled(
       Array.from({ length: 12 }, (_, i) =>
         settleInTransaction({ taskId: "T1", workerId: "W", ok: i % 2 === 0 })),
