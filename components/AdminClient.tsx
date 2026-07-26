@@ -178,52 +178,65 @@ export default function AdminClient() {
 }
 
 /* ============ 分区表单编辑器 ============ */
+/** 从图片列表里挑出外链 URL；上传的 base64 图片不进输入框 */
+function linkOnly(images: string[] | undefined): string[] {
+  return (images || []).filter((x) => typeof x === "string" && !x.startsWith("data:"));
+}
+
 function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview, orgRole }: any) {
+  const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
 
   /** 上传图片：浏览器端压缩到合理尺寸后存为 data URL。
    *  这样图片随模块数据一起保存，不需要外部图床，也不会遇到淘宝那类站点的防盗链。 */
   async function uploadImages(files: FileList | null) {
     if (!files?.length) return;
-    const MAX_EDGE = 800;          // 长边上限，够看清模块细节
-    const MAX_BYTES = 400 * 1024;  // 单张上限，避免撑爆数据库行
+    const MAX_EDGE = 800;          // 长边上限，够看清模块丝印与接口
+    const MAX_BYTES = 320 * 1024;  // 单张上限，避免撑爆数据库行
+    const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (!list.length) return;
+
+    setUploading({ done: 0, total: list.length });
     const out: string[] = [];
 
-    for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
+    for (let i = 0; i < list.length; i++) {
+      const file = list[i];
       try {
+        // createImageBitmap 直接从 File 解码，跳过 FileReader→dataURL→Image 三次转换，
+        // 大图上传明显更快；解码在浏览器内部线程完成，不阻塞界面
+        const bitmap = await createImageBitmap(file);
+        const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(bitmap.width * scale);
+        canvas.height = Math.round(bitmap.height * scale);
+        canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        bitmap.close();
+
+        // 按像素数预估质量，一次编码到位；只有仍超限才再压一次，
+        // 避免此前「循环降质最多重编码 4 次」的卡顿
+        const px = canvas.width * canvas.height;
+        let quality = px > 400_000 ? 0.72 : px > 160_000 ? 0.8 : 0.86;
+        let blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/jpeg", quality));
+        if (blob && blob.size > MAX_BYTES) {
+          quality = Math.max(0.45, quality * (MAX_BYTES / blob.size) * 0.9);
+          blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/jpeg", quality));
+        }
+        if (!blob) throw new Error("编码失败");
+
         const dataUrl = await new Promise<string>((res, rej) => {
           const r = new FileReader();
           r.onload = () => res(String(r.result));
           r.onerror = () => rej(new Error("读取失败"));
-          r.readAsDataURL(file);
+          r.readAsDataURL(blob!);
         });
-        const img = await new Promise<HTMLImageElement>((res, rej) => {
-          const i = new Image();
-          i.onload = () => res(i);
-          i.onerror = () => rej(new Error("解码失败"));
-          i.src = dataUrl;
-        });
-        const scale = Math.min(1, MAX_EDGE / Math.max(img.width, img.height));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-        canvas.getContext("2d")?.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-        // 逐步降质直到满足体积上限
-        let quality = 0.85;
-        let encoded = canvas.toDataURL("image/jpeg", quality);
-        while (encoded.length * 0.75 > MAX_BYTES && quality > 0.4) {
-          quality -= 0.15;
-          encoded = canvas.toDataURL("image/jpeg", quality);
-        }
-        out.push(encoded);
+        out.push(dataUrl);
       } catch {
         console.warn(`图片 ${file.name} 处理失败`);
       }
+      setUploading({ done: i + 1, total: list.length });
     }
-    if (out.length) {
-      setDraft((d: any) => ({ ...d, images: [...(d.images || []), ...out] }));
-    }
+
+    if (out.length) setDraft((d: any) => ({ ...d, images: [...(d.images || []), ...out] }));
+    setUploading(null);
   }
 
   const set = (k: string, v: any) => setDraft({ ...draft, [k]: v });
@@ -292,10 +305,29 @@ function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview, orgRole }:
               <input type="file" accept="image/*" multiple hidden
                 onChange={(e) => uploadImages(e.target.files)} />
             </label>
-            <span className="hint">支持多选 · 自动压缩后随模块保存，无需图床</span>
+            <span className="hint">
+              {uploading
+                ? `正在处理 ${uploading.done}/${uploading.total}…`
+                : "支持多选 · 自动压缩后随模块保存，无需图床"}
+            </span>
           </div>
-          <textarea value={lines(draft.images)} onChange={(e) => set("images", parseLines(e.target.value))}
-            placeholder="也可直接粘贴图片 URL，每行一个" style={{ minHeight: 36, marginTop: 6 }} />
+          {/* 输入框只承载外链 URL。上传的图片是 base64 数据（往往几十万字符），
+              放进来会挤满整个框、既看不懂也没法编辑，因此只在下方以缩略图呈现。 */}
+          <textarea
+            value={linkOnly(draft.images).join("\n")}
+            onChange={(e) => {
+              const links = parseLines(e.target.value);
+              const uploaded = (draft.images || []).filter((x: string) => x.startsWith("data:"));
+              set("images", [...uploaded, ...links]);   // 保留已上传的图片
+            }}
+            placeholder="也可直接粘贴图片 URL，每行一个"
+            style={{ minHeight: 36, marginTop: 6 }} />
+          {(draft.images || []).some((x: string) => x.startsWith("data:")) && (
+            <p className="hint" style={{ margin: "4px 0 0" }}>
+              另有 {(draft.images || []).filter((x: string) => x.startsWith("data:")).length} 张已上传的图片
+              （数据随模块保存，不占用输入框）
+            </p>
+          )}
         </F>
         {(draft.images || []).length > 0 && (
           <div className="module-gallery" style={{ marginTop: -6 }}>

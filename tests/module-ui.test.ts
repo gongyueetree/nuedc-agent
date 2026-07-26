@@ -308,8 +308,8 @@ describe("首页板块与上传功能（防回归）", () => {
     const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
     expect(src).toContain("MAX_EDGE");
     expect(src).toContain("MAX_BYTES");
-    expect(src).toContain("toDataURL");
-    expect(src).toMatch(/quality\s*-=/);      // 超限时降质重编码
+    expect(src).toContain("canvas.toBlob");            // 异步编码，不阻塞界面
+    expect(src).toMatch(/quality = Math\.max/);        // 超限时按比例再压一次
   });
 
   it("缩略图不使用会塌陷的 aspect-ratio + height:auto 组合", async () => {
@@ -317,5 +317,50 @@ describe("首页板块与上传功能（防回归）", () => {
     const css = fs.readFileSync("app/globals.css", "utf8");
     expect(css).toMatch(/\.mod-card \.thumb \{[\s\S]{0,120}height:\s*74px/);
     expect(css).not.toMatch(/\.mod-card \.thumb \{ aspect-ratio: 1 \/ 1; height: auto/);
+  });
+});
+
+describe("图片上传的性能与可读性", () => {
+  it("输入框只显示外链，不塞入 base64 数据", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    expect(src).toContain("function linkOnly");
+    expect(src).toContain('!x.startsWith("data:")');
+    // 输入框绑定的是过滤后的外链，而非完整列表
+    expect(src).toContain("value={linkOnly(draft.images).join");
+    expect(src).not.toContain("value={lines(draft.images)}");
+  });
+
+  it("编辑外链时保留已上传的图片", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    // 只改外链部分，data: 开头的上传图必须原样保留
+    expect(src).toContain('const uploaded = (draft.images || []).filter((x: string) => x.startsWith("data:"))');
+    expect(src).toContain("set(\"images\", [...uploaded, ...links])");
+  });
+
+  it("上传用 createImageBitmap 解码，避免 FileReader→Image 多次转换", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    expect(src).toContain("createImageBitmap(file)");
+    expect(src).toContain("bitmap.close()");
+    // 用 toBlob（异步）而非 toDataURL（同步阻塞）
+    expect(src).toContain("canvas.toBlob");
+  });
+
+  it("按像素数预估质量，最多再压一次，不做循环重编码", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    const fn = src.slice(src.indexOf("async function uploadImages"), src.indexOf("setUploading(null)"));
+    expect(fn).toContain("px > 400_000");
+    // 不得有 while 循环降质
+    expect(fn).not.toMatch(/while\s*\([^)]*quality/);
+  });
+
+  it("多张上传时显示进度", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    expect(src).toContain("setUploading({ done:");
+    expect(src).toContain("正在处理");
   });
 });
