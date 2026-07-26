@@ -70,6 +70,20 @@ jobs:
       - name: Test
         run: npm test
 
+      # 事务原子性必须对真实 PostgreSQL 验证 —— mock 与内存库无法覆盖
+      # BEGIN/COMMIT/ROLLBACK 语义，尤其是注入故障后的双向回滚
+      - name: Transaction integration tests (real postgres:16)
+        env:
+          TEST_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/nuedc_ci
+        run: |
+          set -o pipefail
+          npx vitest run tests/tx-integration.test.ts 2>&1 | tee reports/tx-integration.log
+          # 确认测试真的跑了而不是被跳过
+          if grep -q "事务原子性集成测试已跳过" reports/tx-integration.log; then
+            echo "❌ 事务集成测试被跳过（TEST_DATABASE_URL 未生效），视为失败"
+            exit 1
+          fi
+
       - name: DOCX export check
         run: npm run verify:docx
 

@@ -200,3 +200,98 @@ describe("CI 可重复性", () => {
     }
   });
 });
+
+describe("P0 事务真实性（不得静默降级）", () => {
+  it("withTransaction 不再对任何驱动降级为顺序执行", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/db.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function withTransaction"), src.indexOf("export function txDriverKind"));
+    // 曾经的降级分支必须消失
+    expect(src).not.toContain("return fn(db())");
+    expect(fn).toContain("BEGIN");
+    expect(fn).toContain("COMMIT");
+    expect(fn).toContain("ROLLBACK");
+    expect(fn).toContain("pool.connect()");
+  });
+
+  it("无事务驱动时 fail closed，抛 TRANSACTION_DRIVER_UNAVAILABLE", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/db.ts", "utf8");
+    expect(src).toContain("TRANSACTION_DRIVER_UNAVAILABLE");
+    expect(src).toContain("拒绝以顺序独立查询降级执行");
+  });
+
+  it("Neon 走 WebSocket Pool，Node 20 无全局 WebSocket 时回退 pg", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/db.ts", "utf8");
+    expect(src).toContain("neonConfig.webSocketConstructor");
+    expect(src).toContain('require("pg")');
+    // 事务池与 db() 的 HTTP 驱动分开
+    expect(src).toContain("_txPool");
+  });
+
+  it("配额结算接受事务执行器，与状态转换同事务", async () => {
+    const fs = await import("node:fs");
+    const usage = fs.readFileSync("lib/usage.ts", "utf8");
+    expect(usage).toContain("commitQuota(ref: string, tx?: TxExecutor)");
+    expect(usage).toContain("refundQuota(owner: string, kind: string, ref: string, tx?: TxExecutor)");
+    expect(usage).toContain("const exec = tx ?? db()");
+
+    const queue = fs.readFileSync("lib/task-queue.ts", "utf8");
+    // 必须把 tx 传下去，否则配额走独立连接、回滚时不一致
+    expect(queue).toContain("String(row.quota_ref), tx)");
+    expect(queue).toContain("commitQuota(String(row.quota_ref), tx)");
+  });
+
+  it("事务内的配额结算不吞错误（失败必须回滚整个事务）", async () => {
+    const fs = await import("node:fs");
+    const usage = fs.readFileSync("lib/usage.ts", "utf8");
+    const txBranch = usage.slice(usage.indexOf("if (tx) {"), usage.indexOf("// 事务外（兼容旧调用点）"));
+    expect(txBranch).not.toContain(".catch(() => {})");
+  });
+});
+
+describe("P1 租户命名空间强度", () => {
+  it("命名空间至少 12 位十六进制", async () => {
+    const { NS_HEX_LEN, makeModuleId } = await import("../lib/module-id");
+    expect(NS_HEX_LEN).toBeGreaterThanOrEqual(12);
+    const id = makeModuleId("x", { scope: "ORGANIZATION", owner_ref: "u", org_ref: "ezplm:ws-a" });
+    const hex = id.replace(/^org-/, "").split("-")[0];
+    expect(hex.length).toBeGreaterThanOrEqual(12);
+    expect(hex).toMatch(/^[0-9a-f]+$/);
+  });
+
+  it("大量租户下无碰撞", async () => {
+    const { makeModuleId } = await import("../lib/module-id");
+    const ids = new Set<string>();
+    for (let i = 0; i < 5000; i++) {
+      ids.add(makeModuleId("same-slug", {
+        scope: "ORGANIZATION", owner_ref: `u${i}`, org_ref: `ezplm:ws-${i}`,
+      }));
+    }
+    expect(ids.size).toBe(5000);   // 每个组织独立主键，无碰撞
+  });
+});
+
+describe("P1 冲突检测用错误码而非消息匹配", () => {
+  it("按 PostgreSQL 23505 判定唯一约束冲突", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/modules/ingest/route.ts", "utf8");
+    expect(src).toContain('e?.code === "23505"');
+    expect(src).toContain("constraint");
+    // 不得再用正则匹配错误消息
+    expect(src).not.toMatch(/duplicate key\|unique constraint/);
+    expect(src).not.toMatch(/\.test\(String\(e\?\.message/);
+  });
+});
+
+describe("P1 .DS_Store 清理", () => {
+  it("仓库中不存在 .DS_Store 文件", async () => {
+    const fs = await import("node:fs");
+    const { execFileSync } = await import("node:child_process");
+    const found = execFileSync("find", [".", "-name", ".DS_Store", "-not", "-path", "./node_modules/*"],
+      { encoding: "utf8" }).trim();
+    expect(found, `发现残留：${found}`).toBe("");
+    expect(fs.readFileSync(".gitignore", "utf8")).toContain(".DS_Store");
+  });
+});

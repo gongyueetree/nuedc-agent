@@ -89,8 +89,12 @@ export async function POST(req: NextRequest) {
           JSON.stringify(stored), stored.scope, stored.owner_ref, stored.org_ref, suggested],
       });
     } catch (e: any) {
-      const dup = /duplicate key|unique constraint|already exists/i.test(String(e?.message || e));
-      if (dup) {
+      // 用 PostgreSQL 标准错误码判定唯一约束冲突。
+      // 正则匹配错误消息不可靠：消息随 PG 版本与语言环境变化，
+      // 且可能把其他错误误判为冲突（或漏判导致 500）。
+      const isUniqueViolation = e?.code === "23505"
+        && (!e?.constraint || String(e.constraint).includes("modules_pkey") || String(e.constraint).includes("pkey"));
+      if (isUniqueViolation) {
         await refundQuota(id.owner, "module_ingest", reservation.ref);
         return NextResponse.json({
           error: `已存在同名模块（${moduleId}）。导入不会覆盖已有数据；` +

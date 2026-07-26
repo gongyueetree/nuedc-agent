@@ -16,8 +16,8 @@ describe("主键由服务端生成，租户天然隔离", () => {
     const idA = makeModuleId("mcu-mspm0g3507-lp", orgA);
     const idB = makeModuleId("mcu-mspm0g3507-lp", orgB);
     expect(idA).not.toBe(idB);
-    expect(idA).toMatch(/^org-[0-9a-f]{6}-/);
-    expect(idB).toMatch(/^org-[0-9a-f]{6}-/);
+    expect(idA).toMatch(/^org-[0-9a-f]{12,}-/);
+    expect(idB).toMatch(/^org-[0-9a-f]{12,}-/);
   });
 
   it("组织模块无法与公共模块撞主键（不能覆盖公共库）", () => {
@@ -31,7 +31,7 @@ describe("主键由服务端生成，租户天然隔离", () => {
     const pub = makeModuleId("ads1256-adc", platform);
     const usr = makeModuleId("ads1256-adc", personU1);
     expect(usr).not.toBe(pub);
-    expect(usr).toMatch(/^usr-[0-9a-f]{6}-/);
+    expect(usr).toMatch(/^usr-[0-9a-f]{12,}-/);
   });
 
   it("不同个人用户的同名模块主键不同", () => {
@@ -63,7 +63,7 @@ describe("主键由服务端生成，租户天然隔离", () => {
     const base = makeModuleId("x", orgA);
     const v = nextVariant(base, 0);
     expect(v.startsWith(base)).toBe(true);
-    expect(v).toMatch(/^org-[0-9a-f]{6}-/);
+    expect(v).toMatch(/^org-[0-9a-f]{12,}-/);
   });
 });
 

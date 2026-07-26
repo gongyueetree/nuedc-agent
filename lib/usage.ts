@@ -1,4 +1,4 @@
-import { db, ensureSchema, uid } from "./db";
+import { db, ensureSchema, uid, type TxExecutor } from "./db";
 import type { UserTier } from "./types";
 
 /** 配额与用量。
@@ -60,24 +60,53 @@ export async function reserveQuota(
   return { reservation: { ref, used, quota } };
 }
 
-/** 成功：把预占转为正式消耗 */
-export async function commitQuota(ref: string): Promise<void> {
-  await db().execute({
-    sql: "UPDATE llm_usage SET status='success' WHERE ref=? AND status='reserved'",
+/** 成功：把预占转为正式消耗。
+ *  传入 tx 时在调用方的事务内执行 —— 任务状态转换与配额结算必须同生共死，
+ *  否则进程在两者之间崩溃会留下不一致状态。 */
+export async function commitQuota(ref: string, tx?: TxExecutor): Promise<void> {
+  const exec = tx ?? db();
+  const r = await exec.execute({
+    sql: "UPDATE llm_usage SET status='success' WHERE ref=? AND status='reserved' RETURNING id",
     args: [ref],
-  }).catch(() => {});
+  });
+  // 事务内不吞错误：结算失败必须导致整个事务回滚
+  if (tx && !r.rows.length) {
+    // 预占不存在或已结算过 —— 幂等场景，不算错误
+    return;
+  }
 }
 
-/** 失败：返还配额（计数器 -1，用量标记为 refunded） */
-export async function refundQuota(owner: string, kind: string, ref: string): Promise<void> {
+/** 失败：返还配额（计数器 -1，用量标记为 refunded）。
+ *  同 commitQuota，传入 tx 时在调用方事务内执行。
+ *  两条语句顺序固定：先标记用量状态，命中才回退计数器，
+ *  保证「重复调用不会把计数器减多次」。 */
+export async function refundQuota(owner: string, kind: string, ref: string, tx?: TxExecutor): Promise<void> {
+  const exec = tx ?? db();
+
+  if (tx) {
+    // 事务内：以 llm_usage 的状态转换为准，命中才回退计数器
+    const marked = await exec.execute({
+      sql: "UPDATE llm_usage SET status='refunded' WHERE ref=? AND status='reserved' RETURNING id",
+      args: [ref],
+    });
+    if (!marked.rows.length) return;   // 已结算过，幂等返回
+    await exec.execute({
+      sql: `UPDATE quota_counters SET used = GREATEST(used - 1, 0)
+            WHERE owner=? AND kind=? AND day = CURRENT_DATE`,
+      args: [owner, kind],
+    });
+    return;
+  }
+
+  // 事务外（兼容旧调用点）：尽力而为，失败不阻断主流程
+  await db().execute({
+    sql: "UPDATE llm_usage SET status='refunded' WHERE ref=? AND status='reserved'",
+    args: [ref],
+  }).catch(() => {});
   await db().execute({
     sql: `UPDATE quota_counters SET used = GREATEST(used - 1, 0)
           WHERE owner=? AND kind=? AND day = CURRENT_DATE`,
     args: [owner, kind],
-  }).catch(() => {});
-  await db().execute({
-    sql: "UPDATE llm_usage SET status='refunded' WHERE ref=? AND status='reserved'",
-    args: [ref],
   }).catch(() => {});
 }
 

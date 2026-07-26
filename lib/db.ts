@@ -70,21 +70,83 @@ export function db() {
   };
 }
 
-/** 在事务中执行一组语句。
- *  postgres_pool 用真事务（单连接 BEGIN/COMMIT/ROLLBACK）。
- *  neon HTTP 驱动无法做「依赖前一条结果的条件事务」——其 transaction API 只接受
- *  预构建语句数组。此时降级为顺序执行，正确性由调用方保证：
- *  状态转换用条件 UPDATE 保证只成功一次，配额结算函数本身幂等，
- *  因此顺序执行不会产生重复结算。 */
-export async function withTransaction<T>(fn: (tx: { execute: (s: Stmt) => Promise<{ rows: any[] }> }) => Promise<T>): Promise<T> {
-  const { driver, client } = conn();
+/** 事务执行器。与 db().execute 同接口，但绑定在同一条有状态连接上。 */
+export interface TxExecutor {
+  execute: (stmt: Stmt) => Promise<{ rows: any[] }>;
+}
 
-  if (driver !== "postgres_pool") {
-    return fn(db());   // neon：降级为顺序执行（见上方说明）
+export class TransactionDriverUnavailableError extends Error {
+  readonly code = "TRANSACTION_DRIVER_UNAVAILABLE";
+  constructor(detail: string) {
+    super(`无可用的事务驱动：${detail}。任务状态与配额结算必须在同一事务内完成，` +
+          `拒绝以顺序独立查询降级执行。`);
+    this.name = "TransactionDriverUnavailableError";
+  }
+}
+
+/** 事务专用连接池。与 db() 的 HTTP 驱动分开：
+ *  neon HTTP（无状态）无法执行 BEGIN/COMMIT/ROLLBACK，
+ *  因此事务必须走有状态连接。 */
+let _txPool: any = null;
+let _txPoolKind: "neon_ws" | "pg" | null = null;
+
+function txPool(): { pool: any; kind: string } {
+  if (_txPool && _txPoolKind) return { pool: _txPool, kind: _txPoolKind };
+
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new TransactionDriverUnavailableError("未配置 DATABASE_URL");
+
+  const isNeon = (() => {
+    try { return /\.neon\.tech$/i.test(new URL(url).hostname); } catch { return false; }
+  })();
+
+  // Neon：优先用官方 serverless Pool（WebSocket，serverless 环境更快）
+  if (isNeon) {
+    try {
+      const { Pool: NeonPool, neonConfig } = require("@neondatabase/serverless");
+      // Node 20 无全局 WebSocket，需显式注入构造器
+      if (!neonConfig.webSocketConstructor) {
+        if (typeof globalThis.WebSocket === "function") {
+          neonConfig.webSocketConstructor = globalThis.WebSocket;
+        } else {
+          try { neonConfig.webSocketConstructor = require("ws"); } catch { /* 落到 pg 分支 */ }
+        }
+      }
+      if (neonConfig.webSocketConstructor) {
+        _txPool = new NeonPool({ connectionString: url, max: Number(process.env.PG_POOL_MAX || 5) });
+        _txPoolKind = "neon_ws";
+        return { pool: _txPool, kind: _txPoolKind };
+      }
+    } catch { /* 继续尝试 pg */ }
   }
 
-  const c = await client.connect();
-  const tx = {
+  // 标准 Postgres 协议（Neon 同样支持），作为通用事务通道
+  try {
+    const { Pool } = require("pg");
+    _txPool = new Pool({
+      connectionString: url,
+      max: Number(process.env.PG_POOL_MAX || 5),
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000,
+      ssl: isNeon || /sslmode=require/.test(url) ? { rejectUnauthorized: false } : undefined,
+    });
+    _txPoolKind = "pg";
+    return { pool: _txPool, kind: _txPoolKind };
+  } catch (e: any) {
+    throw new TransactionDriverUnavailableError(
+      `neon WebSocket 与 pg 均不可用（${String(e?.message || e).slice(0, 120)}）`);
+  }
+}
+
+/** 在真实数据库事务中执行。
+ *
+ *  绝不降级为顺序独立查询：状态转换与配额结算必须同生共死，
+ *  否则进程在两者之间崩溃会留下「任务已终态但配额未结算」的不一致。
+ *  无可用事务驱动时抛 TRANSACTION_DRIVER_UNAVAILABLE，由调用方决定如何处理。 */
+export async function withTransaction<T>(fn: (tx: TxExecutor) => Promise<T>): Promise<T> {
+  const { pool } = txPool();
+  const c = await pool.connect();
+  const tx: TxExecutor = {
     async execute(stmt: Stmt) {
       const s = typeof stmt === "string" ? { sql: stmt, args: [] as unknown[] } : stmt;
       const r = await c.query(toPgPlaceholders(s.sql), (s.args ?? []) as unknown[]);
@@ -104,7 +166,12 @@ export async function withTransaction<T>(fn: (tx: { execute: (s: Stmt) => Promis
   }
 }
 
-/** 当前使用的驱动（诊断与 /api/ready 用） */
+/** 事务驱动可用性（/api/admin/readiness 用） */
+export function txDriverKind(): string {
+  try { return txPool().kind; } catch { return "unavailable"; }
+}
+
+/** 当前使用的驱动（诊断与 /api/ready 用） *//** 当前使用的驱动（诊断与 /api/ready 用） */
 export function dbDriver(): string {
   try { return conn().driver; } catch { return "unconfigured"; }
 }
@@ -114,8 +181,11 @@ export async function closeDb(): Promise<void> {
   if (_driver === "postgres_pool" && _client?.end) {
     await _client.end().catch(() => {});
   }
+  if (_txPool?.end) await _txPool.end().catch(() => {});
   _client = null;
   _driver = null;
+  _txPool = null;
+  _txPoolKind = null;
 }
 
 import { ensureMigrations } from "./migrations";

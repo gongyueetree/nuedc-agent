@@ -131,9 +131,9 @@ export async function completeTask(opts: {
 
     const row: any = claimed.rows[0];
     if (row.quota_ref && row.owner_ref && row.quota_kind) {
-      // 成功才扣，失败/取消一律返还；两个函数都只对 status='reserved' 生效，天然幂等
-      if (opts.ok && !opts.canceled) await commitQuota(String(row.quota_ref));
-      else await refundQuota(String(row.owner_ref), String(row.quota_kind), String(row.quota_ref));
+      // 与状态转换同事务：回滚时任务状态与配额状态一起恢复
+      if (opts.ok && !opts.canceled) await commitQuota(String(row.quota_ref), tx);
+      else await refundQuota(String(row.owner_ref), String(row.quota_kind), String(row.quota_ref), tx);
     }
     return "settled";
   });
@@ -193,7 +193,9 @@ export async function failTask(opts: {
 
     const row: any = dead.rows[0];
     if (row.quota_ref && row.owner_ref && row.quota_kind) {
-      await refundQuota(String(row.owner_ref), String(row.quota_kind), String(row.quota_ref));
+      // 关键：传入 tx，让配额结算与状态转换在同一事务内 ——
+      // 否则两者用不同连接，中途崩溃会留下「任务已 dead 但配额未返还」
+      await refundQuota(String(row.owner_ref), String(row.quota_kind), String(row.quota_ref), tx);
     }
     return "dead";
   });

@@ -23,9 +23,16 @@ export function toSlug(raw: string): string {
   return s || "module";
 }
 
+/** 租户命名空间长度。
+ *  6 位十六进制只有 2^24 空间，按生日悖论约 4000 个租户就有 ~1/1000 碰撞概率；
+ *  碰撞意味着两个组织共用主键前缀，可能互相覆盖模块。取 16 位（64 bit）。 */
+const NS_HEX_LEN = 16;
+
 function ns(ref: string): string {
-  return createHash("sha256").update(ref).digest("hex").slice(0, 6);
+  return createHash("sha256").update(ref).digest("hex").slice(0, NS_HEX_LEN);
 }
+
+export { NS_HEX_LEN };
 
 export interface OwnershipRef {
   scope: string;
