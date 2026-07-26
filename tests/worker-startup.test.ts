@@ -131,3 +131,44 @@ describe("容器化部署健壮性", () => {
     expect(src).toContain("退出以便编排平台重启");
   });
 });
+
+describe("崩溃循环防护", () => {
+  it("schema 缺列时进入待命重试，不退出进程", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    expect(src).toContain("async function waitForSchema");
+    expect(src).toContain("迁移完成后无需重启容器");
+    // 待命循环内不得有 process.exit
+    const fn = src.slice(src.indexOf("async function waitForSchema"), src.indexOf("/** 存活上报循环"));
+    expect(fn).not.toContain("process.exit");
+  });
+
+  it("待命期间会重试迁移，新版本迁移可自动生效", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    const fn = src.slice(src.indexOf("async function waitForSchema"), src.indexOf("/** 存活上报循环"));
+    expect(fn).toContain("await ensureSchema()");
+    expect(fn).toContain("恢复正常工作");
+  });
+
+  it("日志不刷屏：首次告警后按轮次降频", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    const fn = src.slice(src.indexOf("async function waitForSchema"), src.indexOf("/** 存活上报循环"));
+    expect(fn).toContain("warned");
+    expect(fn).toContain("rounds % 10 === 0");
+  });
+
+  it("致命退出前有延迟，避免每秒重启的崩溃循环", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    expect(src).toContain("WORKER_FATAL_DELAY_MS");
+    // 每个 exit(1) 之前都应有延迟或属于 SIGTERM 路径
+    const fatalBlocks = src.split("process.exit(1)").slice(0, -1);
+    for (const b of fatalBlocks) {
+      const tail = b.slice(-400);
+      const ok = tail.includes("WORKER_FATAL_DELAY_MS") || tail.includes("Worker 致命错误");
+      expect(ok, `某个 exit(1) 缺少延迟：${tail.slice(-120)}`).toBe(true);
+    }
+  });
+});

@@ -360,14 +360,15 @@ describe("迁移不可变性（防止已发布迁移被追加内容）", () => {
     }
   });
 
-  it("Worker 遇到 schema 缺列时快速失败，不进入无限重试重启循环", async () => {
+  it("Worker 遇到 schema 缺列时进入待命自愈，既不刷屏也不崩溃循环", async () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
     expect(src).toContain('e?.code === "42703"');      // undefined_column
     expect(src).toContain('e?.code === "42P01"');      // undefined_table
-    expect(src).toContain("重试无法解决");
     expect(src).toContain("npm run db:init");
-    // 启动自检直接查实际列
     expect(src).toContain("information_schema.columns");
+    // 立即 exit(1) 会与编排平台重启策略形成崩溃循环，改为待命重试
+    expect(src).toContain("waitForSchema");
+    expect(src).toContain("迁移完成后无需重启容器");
   });
 });

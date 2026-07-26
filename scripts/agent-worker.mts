@@ -123,6 +123,64 @@ async function executeOne(task: ClaimedTask): Promise<void> {
   }
 }
 
+const REQUIRED_TASK_COLUMNS = [
+  "org_ref", "owner_ref", "project_id", "quota_ref", "quota_kind",
+  "lease_expires_at", "worker_id", "heartbeat_at", "max_attempts",
+];
+
+/** 检查 agent_tasks 是否具备当前 Worker 版本所需的列 */
+async function missingTaskColumns(): Promise<string[]> {
+  const rs = await db().execute({
+    sql: `SELECT column_name FROM information_schema.columns WHERE table_name='agent_tasks'`,
+    args: [],
+  });
+  const have = new Set(rs.rows.map((r: any) => String(r.column_name)));
+  return REQUIRED_TASK_COLUMNS.filter((c) => !have.has(c));
+}
+
+/** 等待数据库 schema 就绪。
+ *  每轮重新执行迁移再检查 —— 若缺的列由新迁移提供，这里会自动补上；
+ *  若迁移已跑过但列仍缺（历史上迁移内容被改过），则等待运维介入，
+ *  期间保持进程存活，避免崩溃循环刷屏。 */
+async function waitForSchema(): Promise<void> {
+  const RECHECK_MS = 30_000;
+  let warned = false;
+  let rounds = 0;
+
+  for (;;) {
+    let missing: string[] = [];
+    try {
+      missing = await missingTaskColumns();
+    } catch (e: any) {
+      log(`⚠ schema 自检失败，${RECHECK_MS / 1000}s 后重试：${String(e?.message || e).slice(0, 140)}`);
+      await sleep(RECHECK_MS);
+      continue;
+    }
+
+    if (!missing.length) {
+      if (warned) log("✓ 数据库 schema 已就绪，恢复正常工作");
+      return;
+    }
+
+    if (!warned) {
+      // 只在首次与每 10 轮打印，避免刷屏
+      log(`❌ agent_tasks 缺少列：${missing.join(", ")}`);
+      log("   数据库 schema 落后于当前 Worker 版本，暂不认领任务。");
+      log("   修复方式：对同一个库执行 DATABASE_URL=... npm run db:init");
+      log(`   本进程将每 ${RECHECK_MS / 1000}s 自动重试，迁移完成后无需重启容器。`);
+      warned = true;
+    } else if (++rounds % 10 === 0) {
+      log(`仍在等待 schema 就绪（缺 ${missing.length} 列，已等待 ${Math.round(rounds * RECHECK_MS / 60000)} 分钟）`);
+    }
+
+    await bumpWorkerMetric(WORKER_ID, "schema_mismatch", `missing: ${missing.join(",")}`);
+
+    // 重新尝试迁移：新版本代码带来的迁移会在这里生效
+    try { await ensureSchema(); } catch { /* 下一轮继续 */ }
+    await sleep(RECHECK_MS);
+  }
+}
+
 /** 存活上报循环：让 /api/admin/readiness 能看到本 Worker。
  *  必须独立于任务心跳 —— 空闲时也要上报，否则会被误判为已下线。 */
 async function aliveLoop() {
@@ -168,19 +226,20 @@ async function consumeLoop(heavy: boolean, slots: number) {
       // 缺列/缺表是 schema 问题，重启一百次也不会好 —— 立刻退出并说明原因，
       // 而不是重试 10 次后重启、再重试 10 次的无限循环
       if (e?.code === "42703" || e?.code === "42P01" || /does not exist/i.test(msg)) {
-        log(`❌ 数据库 schema 与当前 Worker 版本不匹配：${msg.slice(0, 160)}`);
-        log("   重试无法解决。请对同一个库执行：DATABASE_URL=... npm run db:init");
+        // 运行中 schema 变更（如回滚了迁移）：回到待命等待，不退出、不刷屏
+        log(`⚠ 认领失败：schema 不匹配（${msg.slice(0, 120)}），转入待命等待`);
         await bumpWorkerMetric(WORKER_ID, "schema_mismatch", msg);
-        shuttingDown = true;
-        await closeDb();
-        process.exit(1);
+        await waitForSchema();
+        consecutiveFailures = 0;
+        continue;
       }
       consecutiveFailures++;
       log(`认领异常(${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}):`, msg.slice(0, 120));
       await bumpWorkerMetric(WORKER_ID, "claim_db_errors", msg);
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        log("❌ 连续认领失败次数过多，退出以便编排平台重启");
+        log("❌ 连续认领失败次数过多，延迟后退出以便编排平台重启");
         shuttingDown = true;
+        await sleep(Number(process.env.WORKER_FATAL_DELAY_MS || 15_000));
         await closeDb();
         process.exit(1);
       }
@@ -203,31 +262,18 @@ async function main() {
   } catch (e: any) {
     log(`❌ 数据库不可用，Worker 无法启动：${String(e?.message || e).slice(0, 200)}`);
     log("   请检查 DATABASE_URL 是否正确、数据库是否可从本容器访问。");
+    // 延迟退出：立即退出会与编排平台的重启策略形成每秒一次的崩溃循环，
+    // 既刷屏又拖慢真正的故障恢复。等待后退出，让重启节奏可控。
+    await sleep(Number(process.env.WORKER_FATAL_DELAY_MS || 15_000));
     await closeDb();
     process.exit(1);
   }
 
-  // schema 版本自检：ensureSchema 只保证迁移「跑过」，
-  // 若 Web 与 Worker 版本不一致（Worker 更新了但库没迁移），
-  // 认领 SQL 会因缺列一直失败。启动时直接查实际列，缺什么说什么。
-  try {
-    const need = ["org_ref", "owner_ref", "project_id", "quota_ref", "lease_expires_at", "worker_id"];
-    const rs = await db().execute({
-      sql: `SELECT column_name FROM information_schema.columns WHERE table_name='agent_tasks'`,
-      args: [],
-    });
-    const have = new Set(rs.rows.map((r: any) => String(r.column_name)));
-    const missing = need.filter((c) => !have.has(c));
-    if (missing.length) {
-      log(`❌ agent_tasks 缺少列：${missing.join(", ")}`);
-      log("   数据库 schema 落后于当前 Worker 版本，认领任务会持续失败。");
-      log("   请对同一个库执行迁移后再启动：DATABASE_URL=... npm run db:init");
-      await closeDb();
-      process.exit(1);   // 立即退出，不进入无意义的重试循环
-    }
-  } catch (e: any) {
-    log(`⚠ schema 自检失败（继续启动）：${String(e?.message || e).slice(0, 150)}`);
-  }
+  // schema 自检：等待 schema 就绪，而不是退出。
+  // 立即 exit(1) 配合编排平台的重启策略会形成崩溃循环 ——
+  // 每秒重启一次、日志刷屏、平台标记 Crashed，且问题本身并不会因重启好转。
+  // 这里改为待命重试：定期重查，运维跑完迁移后自动恢复，无需人工重启容器。
+  await waitForSchema();
   log(`启动：重型槽位 ${HEAVY_SLOTS} · 轻型槽位 ${LIGHT_SLOTS} · 轮询 ${POLL_MS}ms · 驱动 ${dbDriver()}`);
 
   const shutdown = async (sig: string) => {
