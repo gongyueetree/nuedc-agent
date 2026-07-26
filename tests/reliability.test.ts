@@ -431,3 +431,26 @@ describe("配额路径原子性（本轮审查）", () => {
     expect(src).toContain("并发预占不会超发配额");
   });
 });
+
+describe("集成测试自身的健壮性", () => {
+  it("连接池生命周期唯一 —— 多个 describe 共用 pool 会在 afterAll 后失效", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("tests/tx-integration.test.ts", "utf8");
+    // 需要数据库的用例必须在同一个顶层 describe 内，共享一次 beforeAll/afterAll。
+    // 拆成两个顶层 describe 时，先执行的 afterAll 会 pool.end()，
+    // 后一个 describe 再用同一 pool 就报 "Cannot use a pool after calling end"
+    expect((src.match(/^beforeAll\(|\n  beforeAll\(/gm) || []).length).toBe(1);
+    expect((src.match(/^afterAll\(|\n  afterAll\(/gm) || []).length).toBe(1);
+    expect((src.match(/pool\?\.end\(\)/g) || []).length).toBe(1);
+  });
+
+  it("测试表全部带 tx_test_ 前缀，不与生产表同名", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("tests/tx-integration.test.ts", "utf8");
+    const creates = src.match(/CREATE TABLE IF NOT EXISTS (\w+)/g) || [];
+    expect(creates.length).toBeGreaterThan(0);
+    for (const c of creates) {
+      expect(c, `${c} 未使用测试前缀`).toContain("tx_test_");
+    }
+  });
+});
