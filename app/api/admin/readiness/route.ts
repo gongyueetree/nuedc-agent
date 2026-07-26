@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, ensureSchema, dbDriver } from "@/lib/db";
 import { resolveTier } from "@/lib/auth";
-import { workerStatus, WORKER_LIVE_WINDOW_SEC } from "@/lib/task-queue";
+import { workerStatus, workerMetrics, WORKER_LIVE_WINDOW_SEC } from "@/lib/task-queue";
 import { configuredProviders } from "@/lib/model-gateway";
 import { getSystemMode } from "@/lib/system-mode";
 
@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "需要管理员身份" }, { status: 403 });
   }
 
-  const out: Record<string, any> = { ok: true, checks: {} };
+  const out: Record<string, any> = { ok: true };
 
   try {
     await ensureSchema();
@@ -34,10 +34,19 @@ export async function GET(req: NextRequest) {
     out.ok = false;
   }
 
+  // fail-closed：查询失败 ≠ 没有 Worker。把异常伪装成 live=0 会让压测/部署
+  // 误判为"环境正常但无 Worker"，掩盖真正的数据库故障。
   try {
-    out.workers = { ...(await workerStatus()), live_window_sec: WORKER_LIVE_WINDOW_SEC };
-  } catch {
-    out.workers = { live: 0, total: 0, capacity: { heavy: 0, light: 0 }, inFlight: 0, workers: [] };
+    out.workers = { ok: true, ...(await workerStatus()), live_window_sec: WORKER_LIVE_WINDOW_SEC };
+  } catch (e: any) {
+    out.workers = { ok: false, error: String(e?.message || e).slice(0, 200) };
+    out.ok = false;
+  }
+
+  try {
+    out.worker_metrics = await workerMetrics();
+  } catch (e: any) {
+    out.worker_metrics = { _error: String(e?.message || e).slice(0, 160) };
   }
 
   try {
@@ -49,12 +58,15 @@ export async function GET(req: NextRequest) {
     const by: Record<string, number> = {};
     for (const r of q.rows as any[]) by[String(r.status)] = Number(r.n);
     out.queue = {
+      ok: true,
       queued: by.queued || 0, running: by.running || 0,
-      ok: by.ok || 0, error: by.error || 0, dead: by.dead || 0,
+      succeeded: by.ok || 0, failed: by.error || 0, dead: by.dead || 0,
       backlog: (by.queued || 0) + (by.running || 0),
     };
-  } catch {
-    out.queue = null;
+  } catch (e: any) {
+    // 同上：queue=null 会被消费方当成"队列为空"
+    out.queue = { ok: false, error: String(e?.message || e).slice(0, 200) };
+    out.ok = false;
   }
 
   const providers = configuredProviders();

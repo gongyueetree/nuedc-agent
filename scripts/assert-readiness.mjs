@@ -65,6 +65,16 @@ if (MODE === "report-only") {
 }
 
 const results = [];
+// 任一子系统查询失败即视为未就绪（fail-closed）
+results.push(check("整体就绪", data.ok === true,
+  data.ok ? "所有子系统正常" : "存在查询失败的子系统"));
+
+results.push(check("Worker 查询", data.workers?.ok !== false,
+  data.workers?.ok === false ? `失败：${data.workers.error}` : "正常"));
+
+results.push(check("队列查询", data.queue?.ok !== false,
+  data.queue?.ok === false ? `失败：${data.queue.error}` : "正常"));
+
 results.push(check("数据库连通", data.database?.ok === true,
   data.database?.ok ? `驱动 ${data.database.driver} · ${data.database.migrations_applied} 个迁移` : data.database?.error || "不可用"));
 

@@ -70,6 +70,40 @@ export function db() {
   };
 }
 
+/** 在事务中执行一组语句。
+ *  postgres_pool 用真事务（单连接 BEGIN/COMMIT/ROLLBACK）。
+ *  neon HTTP 驱动无法做「依赖前一条结果的条件事务」——其 transaction API 只接受
+ *  预构建语句数组。此时降级为顺序执行，正确性由调用方保证：
+ *  状态转换用条件 UPDATE 保证只成功一次，配额结算函数本身幂等，
+ *  因此顺序执行不会产生重复结算。 */
+export async function withTransaction<T>(fn: (tx: { execute: (s: Stmt) => Promise<{ rows: any[] }> }) => Promise<T>): Promise<T> {
+  const { driver, client } = conn();
+
+  if (driver !== "postgres_pool") {
+    return fn(db());   // neon：降级为顺序执行（见上方说明）
+  }
+
+  const c = await client.connect();
+  const tx = {
+    async execute(stmt: Stmt) {
+      const s = typeof stmt === "string" ? { sql: stmt, args: [] as unknown[] } : stmt;
+      const r = await c.query(toPgPlaceholders(s.sql), (s.args ?? []) as unknown[]);
+      return { rows: (r?.rows ?? []) as any[] };
+    },
+  };
+  try {
+    await c.query("BEGIN");
+    const out = await fn(tx);
+    await c.query("COMMIT");
+    return out;
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+
 /** 当前使用的驱动（诊断与 /api/ready 用） */
 export function dbDriver(): string {
   try { return conn().driver; } catch { return "unconfigured"; }

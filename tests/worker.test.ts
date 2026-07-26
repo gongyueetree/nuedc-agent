@@ -34,7 +34,8 @@ describe("任务队列：原子认领与租约", () => {
     // completeTask 带 worker_id 与 status='running' 条件，被回收后更新影响 0 行
     const fn = q.slice(q.indexOf("export async function completeTask"));
     expect(fn).toContain("AND status='running' AND worker_id=?");
-    expect(fn).toContain("if (!claimed.rows.length) return;");
+    // 租约丢失时返回 lease_lost 而非静默 return，调用方能据此丢弃结果
+    expect(fn).toContain('return "lease_lost"');
   });
 });
 

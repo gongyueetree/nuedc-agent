@@ -18,7 +18,7 @@
 import { hostname } from "node:os";
 import "../lib/agents/index";
 import { runAgent } from "../lib/agents/base";
-import { claimTask, heartbeat, reclaimExpired, completeTask, failTask, reportWorkerAlive, unregisterWorker, HEARTBEAT_MS, type ClaimedTask } from "../lib/task-queue";
+import { claimTask, heartbeat, reclaimExpired, completeTask, failTask, reportWorkerAlive, unregisterWorker, bumpWorkerMetric, HEARTBEAT_MS, type ClaimedTask } from "../lib/task-queue";
 import { db, ensureSchema, closeDb, dbDriver } from "../lib/db";
 import type { AgentType, ProjectStage } from "../lib/types";
 
@@ -40,8 +40,14 @@ function log(...args: any[]) {
 async function executeOne(task: ClaimedTask): Promise<void> {
   inFlight++;
   const hb = setInterval(async () => {
-    const alive = await heartbeat(task.task_id, WORKER_ID);
-    if (!alive) log(`⚠ ${task.task_id} 租约已失效（可能已被回收），本次结果将被丢弃`);
+    try {
+      const alive = await heartbeat(task.task_id, WORKER_ID);
+      if (!alive) log(`⚠ ${task.task_id} 租约已失效（可能已被回收），本次结果将被丢弃`);
+    } catch (e: any) {
+      // 不静默：心跳失败会导致租约过期、任务被重复执行，必须可观测
+      await bumpWorkerMetric(WORKER_ID, "heartbeat_db_errors", String(e?.message || e));
+      log(`⚠ 心跳写入失败：${String(e?.message || e).slice(0, 120)}`);
+    }
   }, HEARTBEAT_MS);
 
   try {
@@ -55,7 +61,10 @@ async function executeOne(task: ClaimedTask): Promise<void> {
     // 执行期间被请求取消 → 结果作废（LLM 调用无法中途打断，只能事后判定）
     const cancelCheck = await db().execute({
       sql: "SELECT cancel_requested FROM agent_tasks WHERE task_id=?", args: [task.task_id],
-    }).catch(() => ({ rows: [] as any[] }));
+    }).catch(async (e: any) => {
+      await bumpWorkerMetric(WORKER_ID, "complete_task_db_errors", String(e?.message || e));
+      return { rows: [] as any[] };
+    });
     if (Number((cancelCheck.rows[0] as any)?.cancel_requested || 0) === 1) {
       await completeTask({ taskId: task.task_id, workerId: WORKER_ID, ok: false, canceled: true, result: null });
       log(`✋ ${task.task_id} 已取消`);
@@ -77,21 +86,37 @@ async function executeOne(task: ClaimedTask): Promise<void> {
     }).catch(() => ({ rows: [] as any[] }));
     const wasCanceled = Number((canceled.rows[0] as any)?.cancel_requested || 0) === 1;
 
-    await completeTask({
-      taskId: task.task_id, workerId: WORKER_ID,
-      ok: result.ok, canceled: wasCanceled, result, runId: result.run_id,
-      errorCode: result.ok ? null : "AGENT_FAILED",
-    });
+    let outcome: string;
+    try {
+      outcome = await completeTask({
+        taskId: task.task_id, workerId: WORKER_ID,
+        ok: result.ok, canceled: wasCanceled, result, runId: result.run_id,
+        errorCode: result.ok ? null : "AGENT_FAILED",
+      });
+    } catch (e: any) {
+      await bumpWorkerMetric(WORKER_ID, "complete_task_db_errors", String(e?.message || e));
+      log(`✗ ${task.task_id} 结果写入失败：${String(e?.message || e).slice(0, 120)}`);
+      return;
+    }
+    if (outcome === "lease_lost") {
+      log(`⚠ ${task.task_id} 租约已丢失，结果作废（任务已由其他 Worker 接管）`);
+      return;
+    }
     log(`${result.ok ? "✓" : "✗"} ${task.task_id} ${task.agent_type} (${task.task_type || "-"})${result.ok ? "" : " · " + (result.message || "").slice(0, 60)}`);
   } catch (e: any) {
     const msg = String(e?.message || e);
     // 网络/超时类错误可重试；业务错误不重试
     const retryable = /timeout|ECONN|fetch failed|socket|502|503|504/i.test(msg);
-    const outcome = await failTask({
-      taskId: task.task_id, workerId: WORKER_ID, message: msg,
-      errorCode: retryable ? "TRANSIENT" : "EXECUTION_ERROR", retryable,
-    });
-    log(`✗ ${task.task_id} 异常 → ${outcome}: ${msg.slice(0, 100)}`);
+    try {
+      const outcome = await failTask({
+        taskId: task.task_id, workerId: WORKER_ID, message: msg,
+        errorCode: retryable ? "TRANSIENT" : "EXECUTION_ERROR", retryable,
+      });
+      log(`✗ ${task.task_id} 异常 → ${outcome}: ${msg.slice(0, 100)}`);
+    } catch (dbErr: any) {
+      await bumpWorkerMetric(WORKER_ID, "fail_task_db_errors", String(dbErr?.message || dbErr));
+      log(`✗ ${task.task_id} 失败状态写入异常：${String(dbErr?.message || dbErr).slice(0, 120)}`);
+    }
   } finally {
     clearInterval(hb);
     inFlight--;
@@ -119,6 +144,7 @@ async function reclaimLoop() {
       const { requeued, dead } = await reclaimExpired();
       if (requeued || dead) log(`回收：${requeued} 个重新入队，${dead} 个进入死信`);
     } catch (e: any) {
+      await bumpWorkerMetric(WORKER_ID, "reclaim_db_errors", String(e?.message || e));
       log("回收循环异常:", String(e?.message || e).slice(0, 120));
     }
     await sleep(30_000);

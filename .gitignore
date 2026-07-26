@@ -4,3 +4,7 @@ local.db
 .env.local
 .env
 *.tsbuildinfo
+
+# macOS
+.DS_Store
+**/.DS_Store

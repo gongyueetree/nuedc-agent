@@ -58,7 +58,7 @@ jobs:
       - name: Install
         run: |
           mkdir -p reports
-          npm ci || { echo "::warning::lockfile 过期，回退 npm install"; npm install; }
+          npm ci
 
       - name: Lint
         run: npm run lint

@@ -4,6 +4,7 @@ import { runAgent } from "@/lib/agents/base";
 import { getRequestIdentity, withIdentityCookie } from "@/lib/identity";
 import { reserveQuota, commitQuota, refundQuota } from "@/lib/usage";
 import { canCreateModule } from "@/lib/module-acl";
+import { makeModuleId, toSlug } from "@/lib/module-id";
 import { db, ensureSchema } from "@/lib/db";
 import { audit } from "@/lib/module-query";
 
@@ -68,21 +69,45 @@ export async function POST(req: NextRequest) {
     const mod = out.module;
 
     await ensureSchema();
-    // 落库为草稿，归属已在 Agent 内按身份强制
-    await db().execute({
-      sql: `INSERT INTO modules (id, name, category, version, certification_status, source_type, price, data,
-              scope, owner_ref, org_ref)
-            VALUES (?,?,?,?, 'DRAFT', 'ingest', ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=now()`,
-      args: [mod.id, mod.name, mod.category, mod.version || "1.0.0", mod.price ?? null,
-        JSON.stringify(mod), mod.scope, mod.owner_ref, mod.org_ref],
+
+    // 主键由服务端按归属生成，绝不采用模型输出的 id ——
+    // 否则模型只要输出 "mcu-mspm0g3507-lp" 就能覆盖公共模块或他人模块
+    const suggested = toSlug(mod.id || mod.name || "module");
+    const moduleId = makeModuleId(suggested, {
+      scope: mod.scope, owner_ref: mod.owner_ref, org_ref: mod.org_ref,
     });
+    const stored = { ...mod, id: moduleId, suggested_id: suggested };
+
+    // 只允许 INSERT。冲突说明本租户内已有同名模块，
+    // 必须走 PATCH /api/modules/:id（经 canEditModule）更新，而不是静默覆盖
+    try {
+      await db().execute({
+        sql: `INSERT INTO modules (id, name, category, version, certification_status, source_type, price, data,
+                scope, owner_ref, org_ref, suggested_id)
+              VALUES (?,?,?,?, 'DRAFT', 'ingest', ?, ?, ?, ?, ?, ?)`,
+        args: [moduleId, stored.name, stored.category, stored.version || "1.0.0", stored.price ?? null,
+          JSON.stringify(stored), stored.scope, stored.owner_ref, stored.org_ref, suggested],
+      });
+    } catch (e: any) {
+      const dup = /duplicate key|unique constraint|already exists/i.test(String(e?.message || e));
+      if (dup) {
+        await refundQuota(id.owner, "module_ingest", reservation.ref);
+        return NextResponse.json({
+          error: `已存在同名模块（${moduleId}）。导入不会覆盖已有数据；` +
+                 `如需更新，请在模块编辑页修改，或改用 PATCH /api/modules/${moduleId}。`,
+          existing_module_id: moduleId,
+          suggested_id: suggested,
+        }, { status: 409 });
+      }
+      throw e;
+    }
 
     await commitQuota(reservation.ref);
-    await audit("ingest", mod.id, id.owner).catch(() => {});
+    await audit("ingest", moduleId, id.owner).catch(() => {});
 
     return withIdentityCookie(NextResponse.json({
-      module_id: mod.id,
+      module_id: moduleId,
+      suggested_id: suggested,
       confidence: out.confidence,
       missing_fields: out.missing_fields,
       notes: out.notes,

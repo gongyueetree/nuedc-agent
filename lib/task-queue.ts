@@ -1,4 +1,4 @@
-import { db, ensureSchema } from "./db";
+import { db, ensureSchema, withTransaction } from "./db";
 import { commitQuota, refundQuota } from "./usage";
 
 /** 任务队列：原子认领、租约续期、崩溃回收、死信。
@@ -93,82 +93,110 @@ export async function reclaimExpired(): Promise<{ requeued: number; dead: number
   return { requeued: requeue.rows.length, dead: dead.rows.length };
 }
 
-/** 任务完成：写结果 + 结算配额（幂等，重复调用无副作用） */
+/** 任务完成：写结果 + 结算配额。
+ *  与 failTask 同样的竞态防护：条件 UPDATE ... RETURNING，
+ *  未命中说明租约已丢失，不结算、不覆盖终态。 */
 export async function completeTask(opts: {
   taskId: string; workerId: string; ok: boolean; canceled?: boolean;
   result: any; runId?: string | null; errorCode?: string | null;
-}): Promise<void> {
-  const usage = await db().execute({
-    sql: `SELECT COALESCE(SUM(input_tokens),0) ti, COALESCE(SUM(output_tokens),0) to_,
-                 COALESCE(SUM(estimated_cost),0) cost, COALESCE(SUM(fallback_used),0) fb,
-                 MAX(provider) provider, MAX(model) model
-          FROM llm_usage_events WHERE task_id=?`,
-    args: [opts.taskId],
-  }).catch(() => ({ rows: [{}] as any[] }));
-  const u: any = usage.rows[0] || {};
+}): Promise<"settled" | "lease_lost"> {
+  return withTransaction(async (tx) => {
+    // 用量汇总放在事务内，保证与状态转换看到一致的数据
+    const usage = await tx.execute({
+      sql: `SELECT COALESCE(SUM(input_tokens),0) ti, COALESCE(SUM(output_tokens),0) to_,
+                   COALESCE(SUM(estimated_cost),0) cost, COALESCE(SUM(fallback_used),0) fb,
+                   MAX(provider) provider, MAX(model) model
+            FROM llm_usage_events WHERE task_id=?`,
+      args: [opts.taskId],
+    });
+    const u: any = usage.rows[0] || {};
 
-  const status = opts.canceled ? "canceled" : opts.ok ? "ok" : "error";
-  const claimed = await db().execute({
-    sql: `UPDATE agent_tasks SET status=?, output=?, error=?, error_code=?, last_run_id=?,
-            token_input=?, token_output=?, estimated_cost=?, fallback_count=?,
-            model=COALESCE(?, model), provider_hint=COALESCE(?, provider_hint),
-            lease_expires_at=NULL, completed_at=now(), updated_at=now()
-          WHERE task_id=? AND status='running' AND worker_id=?
-          RETURNING owner_ref, quota_ref, quota_kind`,
-    args: [status, JSON.stringify(opts.result ?? null),
-      opts.ok ? null : (opts.result?.message || "failed"), opts.errorCode ?? null, opts.runId ?? null,
-      Number(u.ti || 0), Number(u.to_ || 0), Number(u.cost || 0), Number(u.fb || 0),
-      u.model ? String(u.model) : null, u.provider ? String(u.provider) : null,
-      opts.taskId, opts.workerId],
-  }).catch(() => ({ rows: [] as any[] }));
+    const status = opts.canceled ? "canceled" : opts.ok ? "ok" : "error";
+    const claimed = await tx.execute({
+      sql: `UPDATE agent_tasks SET status=?, output=?, error=?, error_code=?, last_run_id=?,
+              token_input=?, token_output=?, estimated_cost=?, fallback_count=?,
+              model=COALESCE(?, model), provider_hint=COALESCE(?, provider_hint),
+              lease_expires_at=NULL, completed_at=now(), updated_at=now()
+            WHERE task_id=? AND status='running' AND worker_id=?
+            RETURNING owner_ref, quota_ref, quota_kind`,
+      args: [status, JSON.stringify(opts.result ?? null),
+        opts.ok ? null : (opts.result?.message || "failed"), opts.errorCode ?? null, opts.runId ?? null,
+        Number(u.ti || 0), Number(u.to_ || 0), Number(u.cost || 0), Number(u.fb || 0),
+        u.model ? String(u.model) : null, u.provider ? String(u.provider) : null,
+        opts.taskId, opts.workerId],
+    });
 
-  // 任务已被回收（租约过期）时不结算，避免重复扣费
-  if (!claimed.rows.length) return;
+    // 租约已被回收：本 Worker 的结果作废，绝不结算（否则与接管方重复）
+    if (!claimed.rows.length) return "lease_lost";
 
-  const row: any = claimed.rows[0];
-  if (row.quota_ref && row.owner_ref && row.quota_kind) {
-    // 成功才扣，失败/取消一律返还
-    if (opts.ok && !opts.canceled) await commitQuota(String(row.quota_ref));
-    else await refundQuota(String(row.owner_ref), String(row.quota_kind), String(row.quota_ref));
-  }
+    const row: any = claimed.rows[0];
+    if (row.quota_ref && row.owner_ref && row.quota_kind) {
+      // 成功才扣，失败/取消一律返还；两个函数都只对 status='reserved' 生效，天然幂等
+      if (opts.ok && !opts.canceled) await commitQuota(String(row.quota_ref));
+      else await refundQuota(String(row.owner_ref), String(row.quota_kind), String(row.quota_ref));
+    }
+    return "settled";
+  });
 }
 
-/** 执行失败后按退避重新入队；超过上限进死信并返还配额 */
+/** 任务终态结算结果。lease_lost 表示租约已被回收（本 Worker 无权再写结果）。 */
+export type SettleOutcome = "requeued" | "dead" | "lease_lost";
+
+/** 执行失败后的状态转换。
+ *
+ *  竞态防护（此前的实现有四个缺陷）：
+ *  1. 先 SELECT 再 UPDATE 之间有窗口 —— 租约可能已被回收并重新认领
+ *  2. UPDATE 的 .catch(() => {}) 吞掉数据库错误，失败也当成功
+ *  3. WHERE 缺少 status='running'，可覆盖已完成任务的终态
+ *  4. 无论 UPDATE 是否命中都退款 —— Worker A 租约丢失后仍会退一次，
+ *     Worker B 完成后再结算一次，同一次预占被结算两次
+ *
+ *  现在：单条条件 UPDATE ... RETURNING，只有命中才结算；未命中返回 lease_lost。 */
 export async function failTask(opts: {
   taskId: string; workerId: string; message: string; errorCode?: string | null; retryable: boolean;
-}): Promise<"requeued" | "dead"> {
-  const rs = await db().execute({
-    sql: "SELECT attempts, max_attempts, owner_ref, quota_ref, quota_kind FROM agent_tasks WHERE task_id=?",
-    args: [opts.taskId],
-  }).catch(() => ({ rows: [] as any[] }));
-  const t: any = rs.rows[0] || {};
-  const attempts = Number(t.attempts || 0);
-  const max = Number(t.max_attempts || 3);
+}): Promise<SettleOutcome> {
+  return withTransaction(async (tx) => {
+    // 退避延迟需要 attempts，用 CASE 在同一条语句里算，避免额外的 SELECT 窗口
+    const requeueSql = `
+      UPDATE agent_tasks SET
+        status='queued', worker_id=NULL, lease_expires_at=NULL,
+        error=?, error_code=?,
+        scheduled_at = now() + (LEAST(60, POWER(2, attempts))::int + floor(random()*5)::int || ' seconds')::interval,
+        updated_at=now()
+      WHERE task_id=? AND status='running' AND worker_id=? AND attempts < max_attempts
+      RETURNING task_id`;
 
-  if (opts.retryable && attempts < max) {
-    // 指数退避 + 抖动
-    const delaySec = Math.min(60, 2 ** attempts) + Math.floor(Math.random() * 5);
-    await db().execute({
-      sql: `UPDATE agent_tasks SET status='queued', worker_id=NULL, lease_expires_at=NULL,
-              error=?, error_code=?, scheduled_at = now() + (? || ' seconds')::interval, updated_at=now()
-            WHERE task_id=? AND worker_id=?`,
-      args: [opts.message.slice(0, 500), opts.errorCode ?? null, String(delaySec), opts.taskId, opts.workerId],
-    }).catch(() => {});
-    return "requeued";
-  }
+    if (opts.retryable) {
+      const r = await tx.execute({
+        sql: requeueSql,
+        args: [opts.message.slice(0, 500), opts.errorCode ?? null, opts.taskId, opts.workerId],
+      });
+      // 重新入队成功：任务还会再跑，预占继续持有，不结算配额
+      if (r.rows.length) return "requeued";
+    }
 
-  await db().execute({
-    sql: `UPDATE agent_tasks SET status='dead', worker_id=NULL, lease_expires_at=NULL,
-            error=?, error_code=?, dead_reason=?, completed_at=now(), updated_at=now()
-          WHERE task_id=? AND worker_id=?`,
-    args: [opts.message.slice(0, 500), opts.errorCode ?? null,
-      opts.retryable ? `已达最大重试次数（${max}）` : "不可重试的错误", opts.taskId, opts.workerId],
-  }).catch(() => {});
+    // 走到这里：不可重试，或已达最大重试次数
+    const dead = await tx.execute({
+      sql: `UPDATE agent_tasks SET
+              status='dead', worker_id=NULL, lease_expires_at=NULL,
+              error=?, error_code=?, dead_reason=?, completed_at=now(), updated_at=now()
+            WHERE task_id=? AND status='running' AND worker_id=?
+            RETURNING owner_ref, quota_ref, quota_kind`,
+      args: [opts.message.slice(0, 500), opts.errorCode ?? null,
+        opts.retryable ? "已达最大重试次数" : "不可重试的错误",
+        opts.taskId, opts.workerId],
+    });
 
-  if (t.quota_ref && t.owner_ref && t.quota_kind) {
-      await refundQuota(String(t.owner_ref), String(t.quota_kind), String(t.quota_ref));
-  }
-  return "dead";
+    // 未命中 = 租约已被回收（任务被别的 Worker 接管或已完成）。
+    // 此时本 Worker 无权结算，否则会与接管方重复退款。
+    if (!dead.rows.length) return "lease_lost";
+
+    const row: any = dead.rows[0];
+    if (row.quota_ref && row.owner_ref && row.quota_kind) {
+      await refundQuota(String(row.owner_ref), String(row.quota_kind), String(row.quota_ref));
+    }
+    return "dead";
+  });
 }
 
 /** 队列概览 */
@@ -251,4 +279,40 @@ export async function workerStatus(): Promise<WorkerStatus> {
       stale: !!r.stale,
     })),
   };
+}
+
+
+/** Worker 错误计数。静默 catch 会让"零异常"成为假象，
+ *  这些指标在 /api/admin/readiness 暴露，便于发现数据库抖动。 */
+export async function bumpWorkerMetric(workerId: string, metric: string, lastError?: string): Promise<void> {
+  try {
+    await db().execute({
+      sql: `INSERT INTO worker_metrics (worker_id, metric, count, last_error, last_at)
+            VALUES (?, ?, 1, ?, now())
+            ON CONFLICT (worker_id, metric) DO UPDATE SET
+              count = worker_metrics.count + 1,
+              last_error = EXCLUDED.last_error,
+              last_at = now()`,
+      args: [workerId, metric, (lastError || "").slice(0, 300)],
+    });
+  } catch { /* 指标写入本身失败时无处可记，只能放弃 */ }
+}
+
+export async function workerMetrics(): Promise<Record<string, { count: number; last_error: string | null; last_at: string }>> {
+  await ensureSchema();
+  const rs = await db().execute({
+    sql: `SELECT metric, SUM(count) AS count, MAX(last_at) AS last_at,
+            (ARRAY_AGG(last_error ORDER BY last_at DESC))[1] AS last_error
+          FROM worker_metrics GROUP BY metric`,
+    args: [],
+  });
+  const out: Record<string, any> = {};
+  for (const r of rs.rows as any[]) {
+    out[String(r.metric)] = {
+      count: Number(r.count || 0),
+      last_error: r.last_error ? String(r.last_error) : null,
+      last_at: String(r.last_at),
+    };
+  }
+  return out;
 }

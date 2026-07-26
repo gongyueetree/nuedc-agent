@@ -50,7 +50,7 @@ jobs:
         with: { node-version: 20, cache: npm }
       - name: 安装 ARM 交叉编译工具链
         run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
-      - run: npm ci || npm install
+      - run: npm ci
       - name: 认领并编译
         env:
           BASE_URL: ${{ secrets.APP_BASE_URL }}

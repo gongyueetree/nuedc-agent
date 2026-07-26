@@ -462,6 +462,23 @@ CREATE TABLE IF NOT EXISTS worker_heartbeats (
 CREATE INDEX IF NOT EXISTS idx_worker_seen ON worker_heartbeats(last_seen DESC);
 `,
   },
+  {
+    id: 18,
+    name: "module_suggested_id_and_worker_metrics",
+    sql: `
+ALTER TABLE modules ADD COLUMN IF NOT EXISTS suggested_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_modules_suggested ON modules(suggested_id) WHERE suggested_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS worker_metrics (
+  worker_id TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  last_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (worker_id, metric)
+);
+`,
+  },
 ];
 
 let applied = false;
