@@ -164,9 +164,20 @@ async function consumeLoop(heavy: boolean, slots: number) {
       task = await claimTask(WORKER_ID, { heavy });
       consecutiveFailures = 0;
     } catch (e: any) {
+      const msg = String(e?.message || e);
+      // 缺列/缺表是 schema 问题，重启一百次也不会好 —— 立刻退出并说明原因，
+      // 而不是重试 10 次后重启、再重试 10 次的无限循环
+      if (e?.code === "42703" || e?.code === "42P01" || /does not exist/i.test(msg)) {
+        log(`❌ 数据库 schema 与当前 Worker 版本不匹配：${msg.slice(0, 160)}`);
+        log("   重试无法解决。请对同一个库执行：DATABASE_URL=... npm run db:init");
+        await bumpWorkerMetric(WORKER_ID, "schema_mismatch", msg);
+        shuttingDown = true;
+        await closeDb();
+        process.exit(1);
+      }
       consecutiveFailures++;
-      log(`认领异常(${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}):`, String(e?.message || e).slice(0, 120));
-      // 数据库持续不可用时退出，交给编排平台重启，避免僵死进程占着租约
+      log(`认领异常(${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}):`, msg.slice(0, 120));
+      await bumpWorkerMetric(WORKER_ID, "claim_db_errors", msg);
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         log("❌ 连续认领失败次数过多，退出以便编排平台重启");
         shuttingDown = true;
@@ -194,6 +205,28 @@ async function main() {
     log("   请检查 DATABASE_URL 是否正确、数据库是否可从本容器访问。");
     await closeDb();
     process.exit(1);
+  }
+
+  // schema 版本自检：ensureSchema 只保证迁移「跑过」，
+  // 若 Web 与 Worker 版本不一致（Worker 更新了但库没迁移），
+  // 认领 SQL 会因缺列一直失败。启动时直接查实际列，缺什么说什么。
+  try {
+    const need = ["org_ref", "owner_ref", "project_id", "quota_ref", "lease_expires_at", "worker_id"];
+    const rs = await db().execute({
+      sql: `SELECT column_name FROM information_schema.columns WHERE table_name='agent_tasks'`,
+      args: [],
+    });
+    const have = new Set(rs.rows.map((r: any) => String(r.column_name)));
+    const missing = need.filter((c) => !have.has(c));
+    if (missing.length) {
+      log(`❌ agent_tasks 缺少列：${missing.join(", ")}`);
+      log("   数据库 schema 落后于当前 Worker 版本，认领任务会持续失败。");
+      log("   请对同一个库执行迁移后再启动：DATABASE_URL=... npm run db:init");
+      await closeDb();
+      process.exit(1);   // 立即退出，不进入无意义的重试循环
+    }
+  } catch (e: any) {
+    log(`⚠ schema 自检失败（继续启动）：${String(e?.message || e).slice(0, 150)}`);
   }
   log(`启动：重型槽位 ${HEAVY_SLOTS} · 轻型槽位 ${LIGHT_SLOTS} · 轮询 ${POLL_MS}ms · 驱动 ${dbDriver()}`);
 

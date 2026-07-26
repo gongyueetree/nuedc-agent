@@ -327,3 +327,47 @@ describe("迁移健壮性与测试隔离", () => {
     expect(migIdx).toBeLessThan(smokeIdx);
   });
 });
+
+describe("迁移不可变性（防止已发布迁移被追加内容）", () => {
+  it("已发布迁移的内容哈希锁定 —— 修改会导致部分环境永久缺列", async () => {
+    const { MIGRATIONS } = await import("../lib/migrations");
+    const { createHash } = await import("node:crypto");
+    // 锁定截至迁移 18 的内容。迁移系统按 id 判断是否执行过，
+    // 若追加语句，已跑过该 id 的库不会重跑，新列永远不存在。
+    // 需要补列时必须新增迁移，不能改旧的。
+    const locked: Record<number, string> = {
+      16: "db56f7f4",
+      17: "435e5344",
+      18: "f7fd3fda",
+    };
+    for (const [id, want] of Object.entries(locked)) {
+      const m = (MIGRATIONS as any[]).find((x) => x.id === Number(id));
+      if (!m) continue;
+      const got = createHash("sha256").update(m.sql).digest("hex").slice(0, 8);
+      expect(got, `迁移 ${id} 内容已变更（${got} ≠ ${want}）。` +
+        `已发布迁移不可修改 —— 请新增迁移补列，否则已执行过该 id 的库不会重跑。`).toBe(want);
+    }
+  });
+
+  it("补偿迁移 19 全部语句幂等，可安全重复执行", async () => {
+    const { MIGRATIONS } = await import("../lib/migrations");
+    const m = (MIGRATIONS as any[]).find((x) => x.id === 19);
+    expect(m).toBeTruthy();
+    const stmts = m.sql.split(";").map((s: string) => s.trim())
+      .filter((s: string) => s && !s.startsWith("--"));
+    for (const s of stmts) {
+      expect(s, `非幂等语句：${s.slice(0, 60)}`).toMatch(/IF NOT EXISTS/i);
+    }
+  });
+
+  it("Worker 遇到 schema 缺列时快速失败，不进入无限重试重启循环", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    expect(src).toContain('e?.code === "42703"');      // undefined_column
+    expect(src).toContain('e?.code === "42P01"');      // undefined_table
+    expect(src).toContain("重试无法解决");
+    expect(src).toContain("npm run db:init");
+    // 启动自检直接查实际列
+    expect(src).toContain("information_schema.columns");
+  });
+});

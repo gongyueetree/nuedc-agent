@@ -496,6 +496,58 @@ CREATE TABLE IF NOT EXISTS worker_metrics (
 );
 `,
   },
+  {
+    id: 19,
+    name: "backfill_columns_idempotent",
+    sql: `
+-- 补偿迁移：修复「已发布迁移被追加内容」导致的列缺失。
+--
+-- 迁移系统按 id 判断是否已执行。若某个迁移在部分环境跑过之后又被追加语句，
+-- 那些环境不会重跑，新增的列就永远不存在（Railway Worker 报
+-- column "org_ref" does not exist 即由此而来）。
+--
+-- 本迁移把所有关键列重新声明一遍。ADD COLUMN IF NOT EXISTS 是幂等的，
+-- 已有列不受影响，可安全重复执行。
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS org_ref TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS owner_ref TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS task_type TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 5;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS queue_name TEXT DEFAULT 'default';
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS provider_hint TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS input_hash TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS timeout_at TIMESTAMPTZ;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS fallback_count INTEGER DEFAULT 0;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS token_input INTEGER DEFAULT 0;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS token_output INTEGER DEFAULT 0;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS estimated_cost NUMERIC(12,6) DEFAULT 0;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS error_code TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS worker_id TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS quota_ref TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS quota_kind TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS dead_reason TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS max_attempts INTEGER DEFAULT 3;
+
+ALTER TABLE modules ADD COLUMN IF NOT EXISTS scope TEXT DEFAULT 'PUBLIC';
+ALTER TABLE modules ADD COLUMN IF NOT EXISTS owner_ref TEXT;
+ALTER TABLE modules ADD COLUMN IF NOT EXISTS org_ref TEXT;
+ALTER TABLE modules ADD COLUMN IF NOT EXISTS inventory_qty INTEGER DEFAULT 0;
+ALTER TABLE modules ADD COLUMN IF NOT EXISTS suggested_id TEXT;
+ALTER TABLE modules ADD COLUMN IF NOT EXISTS images TEXT;
+
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS problem_id TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS problem_version INTEGER;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS problem_version_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_tasks_org ON agent_tasks(org_ref, created_at);
+CREATE INDEX IF NOT EXISTS idx_modules_org ON modules(org_ref) WHERE org_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_modules_owner ON modules(owner_ref) WHERE owner_ref IS NOT NULL;
+`,
+  },
 ];
 
 let applied = false;
