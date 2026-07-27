@@ -290,18 +290,37 @@ describe("选题界面不铺开全部题目", () => {
 });
 
 describe("题库去重工具", () => {
-  it("按年份+标题分组，题号不作为身份依据", async () => {
+  it("区分「完全重复」与「同名不同题号」两类", async () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("scripts/dedupe-problems.mts", "utf8");
-    expect(src).toContain("`${r.year}|${String(r.title).trim()}`");
-    expect(src).toContain("题号会因初赛/决赛");
+    // 年份+题号+标题全同 → 确定重复
+    expect(src).toContain("`${r.year}|${String(r.code).trim()}|${String(r.title).trim()}`");
+    // 同名但题号不同 → 很可能是本科组与高职组的同名题，不能删
+    expect(src).toContain("suspicious");
+    expect(src).toContain("高职高专组的同名题");
+    expect(src).toContain("默认不处理");
+  });
+
+  it("同名不同题号需显式开关才处理", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/dedupe-problems.mts", "utf8");
+    expect(src).toContain("INCLUDE_SAME_TITLE");
+    expect(src).toContain('--include-same-title');
+  });
+
+  it("计数字段统一转数字（驱动可能返回字符串）", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/dedupe-problems.mts", "utf8");
+    const fn = src.slice(src.indexOf("function score"), src.indexOf("async function main"));
+    expect(fn).toContain("Number(r.published)");
+    expect(fn).toContain("Number(r.requirements)");
   });
 
   it("保留信息最全的一条：已发布 > 有需求 > 有版本 > 有题面", async () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("scripts/dedupe-problems.mts", "utf8");
     const fn = src.slice(src.indexOf("function score"), src.indexOf("async function main"));
-    expect(fn).toContain("published > 0 ? 10000");
+    expect(fn).toContain("Number(r.published) > 0 ? 10000");
     expect(fn).toContain("requirements");
     expect(fn).toContain("has_raw");
   });
