@@ -18,7 +18,7 @@
 import { hostname } from "node:os";
 import "../lib/agents/index";
 import { runAgent } from "../lib/agents/base";
-import { claimTask, heartbeat, reclaimExpired, completeTask, failTask, reportWorkerAlive, unregisterWorker, bumpWorkerMetric, HEARTBEAT_MS, type ClaimedTask } from "../lib/task-queue";
+import { claimTask, heartbeat, reclaimExpired, completeTask, failTask, reportWorkerAlive, unregisterWorker, bumpWorkerMetric, resetHeartbeatSchemaMode, HEARTBEAT_MS, type ClaimedTask } from "../lib/task-queue";
 import { db, ensureSchema, checkSchemaColumns, closeDb, dbDriver } from "../lib/db";
 import type { AgentType, ProjectStage } from "../lib/types";
 
@@ -163,6 +163,8 @@ async function waitForSchema(): Promise<void> {
 
     if (!missing.length) {
       schemaWaiting = false;
+      // schema 已补齐：清除心跳回退状态，重新尝试写完整字段
+      resetHeartbeatSchemaMode();
       if (warned) log("✓ 数据库 schema 已就绪，恢复正常工作");
       return;
     }

@@ -260,13 +260,37 @@ export const WORKER_LIVE_WINDOW_SEC = 60;
 
 /** Worker 定期上报存活。与任务心跳不同：这是「进程还在」的证明，
  *  即使当前没有任务在跑也要上报，否则 readiness 会误判无可用 Worker。 */
+/** PostgreSQL undefined_column。迁移 20 之前 worker_heartbeats 没有
+ *  schema_waiting / auto_migrate 两列。 */
+const PG_UNDEFINED_COLUMN = "42703";
+
+/** 本进程是否已确认数据库仍是迁移 20 之前的旧结构（避免每次心跳都试一遍） */
+let heartbeatLegacyMode = false;
+
 export async function reportWorkerAlive(info: {
   workerId: string; heavySlots: number; lightSlots: number; inFlight: number;
   driver?: string; schemaWaiting?: boolean; autoMigrate?: boolean;
 }): Promise<void> {
   // 不调 ensureSchema：心跳是高频路径，且只读账号 / AUTO_MIGRATE=0 的 Worker
   // 必须能在不执行 DDL 的前提下上报存活
+  const base = [info.workerId, info.heavySlots, info.lightSlots, info.inFlight, info.driver ?? null];
+
+  const writeLegacy = () => db().execute({
+    sql: `INSERT INTO worker_heartbeats (worker_id, started_at, last_seen, heavy_slots, light_slots, in_flight, driver)
+          VALUES (?, now(), now(), ?, ?, ?, ?)
+          ON CONFLICT (worker_id) DO UPDATE SET
+            last_seen = now(), heavy_slots = EXCLUDED.heavy_slots,
+            light_slots = EXCLUDED.light_slots, in_flight = EXCLUDED.in_flight,
+            driver = EXCLUDED.driver`,
+    args: base,
+  });
+
   try {
+    if (heartbeatLegacyMode) {
+      // 已知是旧结构：直接写旧字段，不再每次都触发一次失败查询
+      await writeLegacy();
+      return;
+    }
     await db().execute({
       sql: `INSERT INTO worker_heartbeats (worker_id, started_at, last_seen, heavy_slots, light_slots,
               in_flight, driver, schema_waiting, auto_migrate)
@@ -276,10 +300,31 @@ export async function reportWorkerAlive(info: {
               light_slots = EXCLUDED.light_slots, in_flight = EXCLUDED.in_flight,
               driver = EXCLUDED.driver, schema_waiting = EXCLUDED.schema_waiting,
               auto_migrate = EXCLUDED.auto_migrate`,
-      args: [info.workerId, info.heavySlots, info.lightSlots, info.inFlight, info.driver ?? null,
-        info.schemaWaiting ? 1 : 0, info.autoMigrate ? 1 : 0],
+      args: [...base, info.schemaWaiting ? 1 : 0, info.autoMigrate ? 1 : 0],
     });
-  } catch { /* 心跳失败不影响任务执行 */ }
+  } catch (e: any) {
+    if (e?.code === PG_UNDEFINED_COLUMN) {
+      // 迁移 20 尚未执行。这恰恰是最需要可观测性的时刻 ——
+      // 待命 Worker 若因缺列而写不进心跳，readiness 里会完全看不到它，
+      // 运维只能看到「没有 Worker」而非「Worker 在等 schema」。
+      heartbeatLegacyMode = true;
+      try {
+        await writeLegacy();
+        await bumpWorkerMetric(info.workerId, "heartbeat_legacy_schema",
+          "worker_heartbeats 缺少 schema_waiting/auto_migrate（迁移 20 未执行），已回退旧字段");
+      } catch (e2: any) {
+        await bumpWorkerMetric(info.workerId, "heartbeat_db_errors", String(e2?.message || e2));
+      }
+      return;
+    }
+    // 非 schema 兼容类错误不得静默：连不上库、权限不足都必须可见
+    await bumpWorkerMetric(info.workerId, "heartbeat_db_errors", String(e?.message || e));
+  }
+}
+
+/** 供测试与迁移完成后重置回退状态 */
+export function resetHeartbeatSchemaMode(): void {
+  heartbeatLegacyMode = false;
 }
 
 /** Worker 退出时注销，让 readiness 立刻反映下线 */
@@ -303,14 +348,25 @@ export interface WorkerStatus {
 
 /** 当前存活的 Worker 概览。live 是判断「任务能不能被消费」的唯一依据。 */
 export async function workerStatus(): Promise<WorkerStatus> {
-  const rs = await db().execute({
-    sql: `SELECT worker_id, last_seen, heavy_slots, light_slots, in_flight,
+  // 读取端同样要兼容旧结构：迁移 20 之前没有这两列，
+  // 直接 SELECT 会让整个 readiness 报错，反而看不到 Worker 存活情况
+  const full = `SELECT worker_id, last_seen, heavy_slots, light_slots, in_flight,
             COALESCE(schema_waiting, 0) AS schema_waiting,
             COALESCE(auto_migrate, 0) AS auto_migrate,
             (last_seen < now() - interval '${WORKER_LIVE_WINDOW_SEC} seconds') AS stale
-          FROM worker_heartbeats ORDER BY last_seen DESC`,
-    args: [],
-  });
+          FROM worker_heartbeats ORDER BY last_seen DESC`;
+  const legacy = `SELECT worker_id, last_seen, heavy_slots, light_slots, in_flight,
+            0 AS schema_waiting, 0 AS auto_migrate,
+            (last_seen < now() - interval '${WORKER_LIVE_WINDOW_SEC} seconds') AS stale
+          FROM worker_heartbeats ORDER BY last_seen DESC`;
+
+  let rs: { rows: any[] };
+  try {
+    rs = await db().execute({ sql: full, args: [] });
+  } catch (e: any) {
+    if (e?.code !== PG_UNDEFINED_COLUMN) throw e;
+    rs = await db().execute({ sql: legacy, args: [] });
+  }
   const rows = rs.rows as any[];
   const alive = rows.filter((r) => !r.stale);
   // 待命中的 Worker 存活但不认领任务 —— 计入 live/capacity 会让

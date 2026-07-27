@@ -108,3 +108,28 @@ LOAD_MODE=queue-only LOAD_USERS=15 BASE_URL=... npm run load-test
 1. **并发隔离**：两个浏览器同时生成方案，在 `/admin/model-operations` 确认用量分别记到各自项目
 2. **Worker 崩溃自愈**：`pm2 stop nuedc-worker` 杀掉正在跑的任务，90 秒后重启，任务应自动重新入队
 3. **降级不白屏**：临时把 `SYSTEM_MODE=RULES_ONLY` 部署一次，确认页面提示清晰且项目编辑仍可用
+
+## 6. Schema 版本与 Worker 兼容性
+
+新版 Worker 遇到旧 schema 时的行为：
+
+| 情况 | Worker 行为 |
+|---|---|
+| schema 完整 | 正常认领任务 |
+| 缺列且 `WORKER_AUTO_MIGRATE=0`（默认） | 进入待命，每 30s 重查，**不执行任何 DDL** |
+| 缺列且 `WORKER_AUTO_MIGRATE=1` | 自行补跑迁移后恢复 |
+
+待命期间 Worker 仍会上报心跳（容量记为 0、`schema_waiting=true`），
+因此 `/api/admin/readiness` 能区分「没有 Worker」与「Worker 在等 schema」。
+
+**迁移 20 之前的库**：`worker_heartbeats` 尚无 `schema_waiting` / `auto_migrate` 两列，
+心跳会自动回退到旧字段写入并记录 `heartbeat_legacy_schema` 指标 ——
+此时仍能看到 Worker 存活与容量为 0，只是无法区分待命原因。
+补跑迁移后 Worker 自动恢复完整上报，无需重启。
+
+**推荐部署顺序**：先执行迁移，再滚动更新 Worker。
+
+```bash
+DATABASE_URL='...' npm run db:init     # 1. 迁移
+# 2. 部署新版本 Web 与 Worker
+```

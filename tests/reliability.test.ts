@@ -288,12 +288,23 @@ describe("P1 冲突检测用错误码而非消息匹配", () => {
 });
 
 describe("P1 .DS_Store 清理", () => {
-  it("仓库中不存在 .DS_Store 文件", async () => {
+  it("源码目录中不存在 .DS_Store，且已被 gitignore", async () => {
     const fs = await import("node:fs");
-    const { execFileSync } = await import("node:child_process");
-    const found = execFileSync("find", [".", "-name", ".DS_Store", "-not", "-path", "./node_modules/*"],
-      { encoding: "utf8" }).trim();
-    expect(found, `发现残留：${found}`).toBe("");
+    // 只扫源码目录：全目录 find 会遍历 node_modules 的数万个文件而超时
+    const roots = ["app", "components", "lib", "scripts", "tests", "data", "docs", "public", ".github"];
+    const found: string[] = [];
+    const walk = (dir: string) => {
+      if (!fs.existsSync(dir)) return;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = `${dir}/${e.name}`;
+        if (e.name === ".DS_Store") found.push(p);
+        else if (e.isDirectory()) walk(p);
+      }
+    };
+    for (const r of roots) walk(r);
+    if (fs.existsSync(".DS_Store")) found.push(".DS_Store");
+
+    expect(found, `发现残留：${found.join(", ")}`).toHaveLength(0);
     expect(fs.readFileSync(".gitignore", "utf8")).toContain(".DS_Store");
   });
 });
@@ -531,5 +542,46 @@ describe("本轮收尾：迁移会话绑定与 Worker 权限", () => {
     expect(src).toContain("单批回收的**总**条数上限");
     expect(src).toContain("const remaining = RECLAIM_BATCH_SIZE - requeueRows.rows.length");
     expect(src).toContain("remaining > 0");
+  });
+});
+
+describe("旧 schema 心跳兼容（迁移 20 未执行）", () => {
+  it("心跳遇到 42703 回退旧字段，不静默丢失", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/task-queue.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function reportWorkerAlive"), src.indexOf("export function resetHeartbeatSchemaMode"));
+    expect(fn).toContain("PG_UNDEFINED_COLUMN");
+    expect(fn).toContain("writeLegacy()");
+    expect(fn).toContain("heartbeat_legacy_schema");   // 回退有 metric 记录
+    // 非 schema 类错误必须记录，不得吞掉
+    expect(fn).toContain("非 schema 兼容类错误不得静默");
+    expect(fn).toContain('bumpWorkerMetric(info.workerId, "heartbeat_db_errors"');
+  });
+
+  it("回退状态缓存，避免每次心跳都触发一次失败查询", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/task-queue.ts", "utf8");
+    expect(src).toContain("heartbeatLegacyMode");
+    expect(src).toContain("if (heartbeatLegacyMode)");
+    expect(src).toContain("export function resetHeartbeatSchemaMode");
+  });
+
+  it("迁移补齐后 Worker 重置回退状态，恢复完整字段", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    expect(src).toContain("resetHeartbeatSchemaMode()");
+    // 必须在确认 schema 就绪的分支里重置
+    const idx = src.indexOf("resetHeartbeatSchemaMode()");
+    const ctx = src.slice(Math.max(0, idx - 300), idx);
+    expect(ctx).toContain("schemaWaiting = false");
+  });
+
+  it("readiness 读取端同样兼容旧结构，不整体失败", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/task-queue.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function workerStatus"));
+    expect(fn).toContain("const legacy = ");
+    expect(fn).toContain("0 AS schema_waiting");
+    expect(fn).toContain("if (e?.code !== PG_UNDEFINED_COLUMN) throw e");
   });
 });

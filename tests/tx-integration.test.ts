@@ -565,6 +565,118 @@ describe.skipIf(!hasDb)("事务与配额原子性（真实 PostgreSQL）", () =>
       } finally { c1.release(); c2.release(); }
     });
   });
+
+  describe("旧 schema 下的待命 Worker 可观测性", () => {
+    /** 迁移 20 之前的 worker_heartbeats 结构（无 schema_waiting / auto_migrate） */
+    const LEGACY_TABLE = "tx_test_hb_legacy";
+
+    beforeEach(async () => {
+      await q(`DROP TABLE IF EXISTS ${LEGACY_TABLE}`);
+      await q(`CREATE TABLE ${LEGACY_TABLE} (
+        worker_id TEXT PRIMARY KEY,
+        started_at TIMESTAMPTZ DEFAULT now(),
+        last_seen TIMESTAMPTZ DEFAULT now(),
+        heavy_slots INTEGER DEFAULT 0,
+        light_slots INTEGER DEFAULT 0,
+        in_flight INTEGER DEFAULT 0,
+        driver TEXT
+      )`);
+    });
+
+    /** 复刻 reportWorkerAlive 的兼容逻辑，直接对真实库执行 */
+    async function reportAlive(table: string, info: {
+      workerId: string; heavy: number; light: number; waiting: boolean; auto: boolean;
+    }): Promise<"full" | "legacy" | "error"> {
+      const base = [info.workerId, info.heavy, info.light, 0, "pg"];
+      try {
+        await q(
+          `INSERT INTO ${table} (worker_id, started_at, last_seen, heavy_slots, light_slots,
+             in_flight, driver, schema_waiting, auto_migrate)
+           VALUES ($1, now(), now(), $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (worker_id) DO UPDATE SET last_seen = now(),
+             heavy_slots = EXCLUDED.heavy_slots, light_slots = EXCLUDED.light_slots,
+             schema_waiting = EXCLUDED.schema_waiting, auto_migrate = EXCLUDED.auto_migrate`,
+          [...base, info.waiting ? 1 : 0, info.auto ? 1 : 0]);
+        return "full";
+      } catch (e: any) {
+        if (e?.code !== "42703") return "error";
+        await q(
+          `INSERT INTO ${table} (worker_id, started_at, last_seen, heavy_slots, light_slots, in_flight, driver)
+           VALUES ($1, now(), now(), $2, $3, $4, $5)
+           ON CONFLICT (worker_id) DO UPDATE SET last_seen = now(),
+             heavy_slots = EXCLUDED.heavy_slots, light_slots = EXCLUDED.light_slots`,
+          base);
+        return "legacy";
+      }
+    }
+
+    it("迁移 20 未执行时：待命 Worker 仍能写入心跳并被 readiness 看到", async () => {
+      // 步骤 2~5：AUTO_MIGRATE=0 的 Worker 进入待命，容量归零
+      const mode = await reportAlive(LEGACY_TABLE, {
+        workerId: "W-wait", heavy: 0, light: 0, waiting: true, auto: false,
+      });
+      expect(mode).toBe("legacy");        // 自动回退，未因缺列而丢失心跳
+
+      const rows = await q(`SELECT worker_id, heavy_slots, light_slots FROM ${LEGACY_TABLE}`);
+      expect(rows.length).toBe(1);        // 进程存活可见
+      expect(Number(rows[0].heavy_slots)).toBe(0);   // 容量为 0
+      expect(Number(rows[0].light_slots)).toBe(0);
+    });
+
+    it("旧 schema 下读取心跳不报错（readiness 不整体失败）", async () => {
+      await reportAlive(LEGACY_TABLE, { workerId: "W1", heavy: 0, light: 0, waiting: true, auto: false });
+
+      // 完整查询会失败，回退查询必须成功
+      let usedLegacy = false;
+      let rows: any[] = [];
+      try {
+        rows = await q(`SELECT worker_id, COALESCE(schema_waiting,0) AS sw FROM ${LEGACY_TABLE}`);
+      } catch (e: any) {
+        expect(e.code).toBe("42703");
+        usedLegacy = true;
+        rows = await q(`SELECT worker_id, 0 AS sw FROM ${LEGACY_TABLE}`);
+      }
+      expect(usedLegacy).toBe(true);
+      expect(rows.length).toBe(1);
+    });
+
+    it("执行迁移 20 后：Worker 恢复上报完整状态", async () => {
+      await reportAlive(LEGACY_TABLE, { workerId: "W2", heavy: 0, light: 0, waiting: true, auto: false });
+
+      // 步骤 6：补跑迁移 20 的列
+      await q(`ALTER TABLE ${LEGACY_TABLE} ADD COLUMN IF NOT EXISTS schema_waiting INTEGER DEFAULT 0`);
+      await q(`ALTER TABLE ${LEGACY_TABLE} ADD COLUMN IF NOT EXISTS auto_migrate INTEGER DEFAULT 0`);
+
+      // 步骤 7：schema 就绪后恢复正常容量与完整字段
+      const mode = await reportAlive(LEGACY_TABLE, {
+        workerId: "W2", heavy: 2, light: 6, waiting: false, auto: false,
+      });
+      expect(mode).toBe("full");
+
+      const rows = await q(
+        `SELECT heavy_slots, light_slots, schema_waiting FROM ${LEGACY_TABLE} WHERE worker_id='W2'`);
+      expect(Number(rows[0].heavy_slots)).toBe(2);
+      expect(Number(rows[0].light_slots)).toBe(6);
+      expect(Number(rows[0].schema_waiting)).toBe(0);
+    });
+
+    it("待命 Worker 不计入可用容量，但计入 schemaWaiting", async () => {
+      await q(`ALTER TABLE ${LEGACY_TABLE} ADD COLUMN IF NOT EXISTS schema_waiting INTEGER DEFAULT 0`);
+      await q(`ALTER TABLE ${LEGACY_TABLE} ADD COLUMN IF NOT EXISTS auto_migrate INTEGER DEFAULT 0`);
+      await reportAlive(LEGACY_TABLE, { workerId: "A", heavy: 0, light: 0, waiting: true, auto: false });
+      await reportAlive(LEGACY_TABLE, { workerId: "B", heavy: 2, light: 6, waiting: false, auto: false });
+
+      const rows = await q(
+        `SELECT worker_id, heavy_slots, light_slots, schema_waiting FROM ${LEGACY_TABLE}`);
+      const available = rows.filter((r: any) => Number(r.schema_waiting) !== 1);
+      const waiting = rows.filter((r: any) => Number(r.schema_waiting) === 1);
+
+      expect(available.length).toBe(1);           // 只有 B 可用
+      expect(waiting.length).toBe(1);
+      const heavy = available.reduce((a: number, r: any) => a + Number(r.heavy_slots), 0);
+      expect(heavy).toBe(2);                      // 容量只算 B
+    });
+  });
 });
 
 describe.skipIf(hasDb)("事务集成测试未运行", () => {
@@ -577,5 +689,6 @@ describe.skipIf(hasDb)("事务集成测试未运行", () => {
     );
     expect(true).toBe(true);
   });
+
 
 });
