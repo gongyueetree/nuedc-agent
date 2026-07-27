@@ -380,23 +380,109 @@ describe.skipIf(!hasDb)("事务与配额原子性（真实 PostgreSQL）", () =>
       await q("TRUNCATE tx_test_agent_tasks");
     });
 
-    it("两个并发迁移执行者只有一个真正执行（advisory lock）", async () => {
-      // 用真实 advisory lock 验证跨会话互斥
+    it("真实 ensureMigrations：lock / DDL / record 在同一 backend", async () => {
+      const { ensureMigrations, resetMigrationCache } = await import("../lib/migrations");
+
+      const pids: number[] = [];
+      let sawLock = false;
+      let sawDDL = false;
+
+      // 自建事务执行器：与 lib/db.ts 的 withTransaction 同语义，
+      // 但在每条语句后记录 pg_backend_pid，验证是否真的共享连接
+      const runTx = async <T,>(fn: (tx: any) => Promise<T>): Promise<T> => {
+        const c = await pool.connect();
+        try {
+          await c.query("BEGIN");
+          const tx = {
+            async execute(stmt: any) {
+              const sql = typeof stmt === "string" ? stmt : stmt.sql;
+              const args = typeof stmt === "string" ? [] : (stmt.args ?? []);
+              if (/pg_advisory_xact_lock/.test(sql)) sawLock = true;
+              if (/^\s*(CREATE|ALTER)/i.test(sql)) sawDDL = true;
+              let i = 0;
+              const pg = sql.replace(/\?/g, () => `$${++i}`);
+              const r = await c.query(pg, args);
+              const pid = await c.query("SELECT pg_backend_pid() AS pid");
+              pids.push(Number(pid.rows[0].pid));
+              return { rows: r.rows };
+            },
+          };
+          const out = await fn(tx);
+          await c.query("COMMIT");
+          return out;
+        } catch (e) {
+          await c.query("ROLLBACK").catch(() => {});
+          throw e;
+        } finally { c.release(); }
+      };
+
+      resetMigrationCache();
+      await ensureMigrations(runTx as any);
+
+      expect(sawLock, "未获取 advisory 锁").toBe(true);
+      expect(sawDDL, "未执行任何 DDL").toBe(true);
+      expect(pids.length).toBeGreaterThan(3);
+      // 所有语句必须落在同一 backend —— 否则 advisory lock 保护不到 DDL
+      expect(new Set(pids).size, `跨了 ${new Set(pids).size} 个 backend`).toBe(1);
+
+      // 清理本次迁移建的表，避免污染其他用例
+      resetMigrationCache();
+    }, 60_000);
+
+    it("xact lock 在事务结束时自动释放，无需手动 unlock", async () => {
       const LOCK = 774_211_903;
       const c1 = await pool.connect();
       const c2 = await pool.connect();
       try {
-        await c1.query("SELECT pg_advisory_lock($1)", [LOCK]);
-        // 第二个会话尝试非阻塞获取，必须失败
-        const r = await c2.query("SELECT pg_try_advisory_lock($1) AS got", [LOCK]);
-        expect(r.rows[0].got).toBe(false);
+        await c1.query("BEGIN");
+        await c1.query("SELECT pg_advisory_xact_lock($1)", [LOCK]);
+        // 持锁期间另一会话拿不到
+        const busy = await c2.query("SELECT pg_try_advisory_xact_lock($1) AS got", [LOCK]);
+        expect(busy.rows[0].got).toBe(false);
 
-        await c1.query("SELECT pg_advisory_unlock($1)", [LOCK]);
-        const r2 = await c2.query("SELECT pg_try_advisory_lock($1) AS got", [LOCK]);
-        expect(r2.rows[0].got).toBe(true);
-        await c2.query("SELECT pg_advisory_unlock($1)", [LOCK]);
+        await c1.query("COMMIT");        // 提交即释放，无需 unlock
+        await c2.query("BEGIN");
+        const free = await c2.query("SELECT pg_try_advisory_xact_lock($1) AS got", [LOCK]);
+        expect(free.rows[0].got).toBe(true);
+        await c2.query("COMMIT");
       } finally { c1.release(); c2.release(); }
     });
+
+    it("并发调用 ensureMigrations 只执行一次迁移", async () => {
+      const { ensureMigrations, resetMigrationCache } = await import("../lib/migrations");
+      let ddlBatches = 0;
+      const runTx = async <T,>(fn: (tx: any) => Promise<T>): Promise<T> => {
+        const c = await pool.connect();
+        try {
+          await c.query("BEGIN");
+          ddlBatches++;
+          const tx = {
+            async execute(stmt: any) {
+              const sql = typeof stmt === "string" ? stmt : stmt.sql;
+              const args = typeof stmt === "string" ? [] : (stmt.args ?? []);
+              let i = 0;
+              const r = await c.query(sql.replace(/\?/g, () => `$${++i}`), args);
+              return { rows: r.rows };
+            },
+          };
+          const out = await fn(tx);
+          await c.query("COMMIT");
+          return out;
+        } catch (e) {
+          await c.query("ROLLBACK").catch(() => {});
+          throw e;
+        } finally { c.release(); }
+      };
+
+      resetMigrationCache();
+      await Promise.all([
+        ensureMigrations(runTx as any),
+        ensureMigrations(runTx as any),
+        ensureMigrations(runTx as any),
+      ]);
+      expect(ddlBatches, "并发调用应复用同一次执行").toBe(1);
+      resetMigrationCache();
+    }, 60_000);
 
     it("1000 条过期任务分批回收，不形成超长事务", async () => {
       const BATCH = 200;

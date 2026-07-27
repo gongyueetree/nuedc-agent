@@ -368,7 +368,7 @@ describe("迁移不可变性（防止已发布迁移被追加内容）", () => {
     expect(src).toContain('e?.code === "42703"');      // undefined_column
     expect(src).toContain('e?.code === "42P01"');      // undefined_table
     expect(src).toContain("npm run db:init");
-    expect(src).toContain("information_schema.columns");
+    expect(src).toContain("checkSchemaColumns");
     // 立即 exit(1) 会与编排平台重启策略形成崩溃循环，改为待命重试
     expect(src).toContain("waitForSchema");
     expect(src).toContain("自动恢复，无需重启容器");
@@ -455,5 +455,81 @@ describe("集成测试自身的健壮性", () => {
     for (const c of creates) {
       expect(c, `${c} 未使用测试前缀`).toContain("tx_test_");
     }
+  });
+});
+
+describe("本轮收尾：迁移会话绑定与 Worker 权限", () => {
+  it("ensureMigrations 接收事务执行器，不再用可能换连接的 db()", async () => {
+    const fs = await import("node:fs");
+    const mig = fs.readFileSync("lib/migrations.ts", "utf8");
+    const db = fs.readFileSync("lib/db.ts", "utf8");
+    // db().execute 不保证同一连接：Neon HTTP 无状态、pg Pool 每次可能换连接
+    expect(mig).toContain("TxRunner");
+    expect(mig).toContain("advisory lock 形同虚设");
+    expect(db).toContain("await ensureMigrations(withTransaction, opts)");
+    expect(db).not.toContain("ensureMigrations(db()");
+  });
+
+  it("使用事务级 advisory lock，异常路径不泄漏锁", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/migrations.ts", "utf8");
+    expect(src).toContain("pg_advisory_xact_lock");
+    // 事务级锁自动释放，不需要也不应该手动 unlock
+    expect(src).not.toContain("pg_advisory_unlock");
+  });
+
+  it("拿不到跨实例锁时 fail closed，不降级为仅进程锁", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/migrations.ts", "utf8");
+    expect(src).toContain("拒绝在无锁保护下执行 DDL");
+    // 不得出现「取锁失败就继续」的降级注释或逻辑
+    expect(src).not.toMatch(/降级为仅进程内互斥|catch\s*\{\s*\}\s*\n\s*await c\.execute\(`CREATE TABLE/);
+  });
+
+  it("WORKER_AUTO_MIGRATE=0 时 Worker 不执行任何 DDL", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    // 启动路径：只有授权时才 ensureSchema，否则仅探活
+    expect(src).toContain("if (AUTO_MIGRATE) {\n      await ensureSchema();");
+    expect(src).toContain('await db().execute("SELECT 1")');
+    // 兼容性检查走只读查询
+    expect(src).toContain("checkSchemaColumns(");
+  });
+
+  it("心跳与状态查询不再触发迁移（只读账号可用）", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/task-queue.ts", "utf8");
+    // 不得有实际调用（注释中提到函数名是允许的）
+    expect(src).not.toMatch(/await ensureSchema\(/);
+    expect(src).not.toMatch(/^import .*ensureSchema/m);
+    expect(src).toContain("只读账号 / AUTO_MIGRATE=0 的 Worker");
+  });
+
+  it("待命中的 Worker 不计入 live 与 capacity", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/task-queue.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function workerStatus"));
+    expect(fn).toContain("const available = alive.filter((r) => Number(r.schema_waiting) !== 1)");
+    expect(fn).toContain("live: available.length");
+    expect(fn).toContain("heavy: available.reduce");
+  });
+
+  it("aliveLoop 在 waitForSchema 之前启动，待命期间上报容量 0", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/agent-worker.mts", "utf8");
+    const aliveIdx = src.indexOf("const aliveTask = aliveLoop()");
+    // main() 里的 waitForSchema 调用（认领循环里那处更早，需从 aliveTask 之后找）
+    const waitIdx = src.indexOf("await waitForSchema()", aliveIdx);
+    expect(aliveIdx).toBeGreaterThan(-1);
+    expect(waitIdx).toBeGreaterThan(aliveIdx);    // 上报先于等待启动
+    expect(src).toContain("heavySlots: schemaWaiting ? 0 : HEAVY_SLOTS");
+  });
+
+  it("RECLAIM_BATCH_SIZE 是单批总量上限，不是每类各 N 条", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/task-queue.ts", "utf8");
+    expect(src).toContain("单批回收的**总**条数上限");
+    expect(src).toContain("const remaining = RECLAIM_BATCH_SIZE - requeueRows.rows.length");
+    expect(src).toContain("remaining > 0");
   });
 });

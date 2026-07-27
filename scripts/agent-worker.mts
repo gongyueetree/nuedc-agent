@@ -19,7 +19,7 @@ import { hostname } from "node:os";
 import "../lib/agents/index";
 import { runAgent } from "../lib/agents/base";
 import { claimTask, heartbeat, reclaimExpired, completeTask, failTask, reportWorkerAlive, unregisterWorker, bumpWorkerMetric, HEARTBEAT_MS, type ClaimedTask } from "../lib/task-queue";
-import { db, ensureSchema, closeDb, dbDriver } from "../lib/db";
+import { db, ensureSchema, checkSchemaColumns, closeDb, dbDriver } from "../lib/db";
 import type { AgentType, ProjectStage } from "../lib/types";
 
 const WORKER_ID = process.env.WORKER_ID || `${hostname()}:${process.pid}`;
@@ -136,12 +136,8 @@ const REQUIRED_TASK_COLUMNS = [
 
 /** 检查 agent_tasks 是否具备当前 Worker 版本所需的列 */
 async function missingTaskColumns(): Promise<string[]> {
-  const rs = await db().execute({
-    sql: `SELECT column_name FROM information_schema.columns WHERE table_name='agent_tasks'`,
-    args: [],
-  });
-  const have = new Set(rs.rows.map((r: any) => String(r.column_name)));
-  return REQUIRED_TASK_COLUMNS.filter((c) => !have.has(c));
+  // 只读查询，不触发迁移
+  return checkSchemaColumns("agent_tasks", REQUIRED_TASK_COLUMNS);
 }
 
 /** 等待数据库 schema 就绪。
@@ -150,6 +146,8 @@ async function missingTaskColumns(): Promise<string[]> {
  *  期间保持进程存活，避免崩溃循环刷屏。 */
 async function waitForSchema(): Promise<void> {
   const RECHECK_MS = 30_000;
+  // 先置位再检查：aliveLoop 可能在检查完成前就上报一次
+  schemaWaiting = true;
   let warned = false;
   let rounds = 0;
 
@@ -164,8 +162,8 @@ async function waitForSchema(): Promise<void> {
     }
 
     if (!missing.length) {
-      if (warned) log("✓ 数据库 schema 已就绪，恢复正常工作");
       schemaWaiting = false;
+      if (warned) log("✓ 数据库 schema 已就绪，恢复正常工作");
       return;
     }
 
@@ -201,7 +199,10 @@ async function waitForSchema(): Promise<void> {
  *  必须独立于任务心跳 —— 空闲时也要上报，否则会被误判为已下线。 */
 async function aliveLoop() {
   const report = () => reportWorkerAlive({
-    workerId: WORKER_ID, heavySlots: HEAVY_SLOTS, lightSlots: LIGHT_SLOTS,
+    workerId: WORKER_ID,
+    // 待命期间容量为 0：它不会认领任何任务，不应被计入可用产能
+    heavySlots: schemaWaiting ? 0 : HEAVY_SLOTS,
+    lightSlots: schemaWaiting ? 0 : LIGHT_SLOTS,
     inFlight, driver: dbDriver(),
     schemaWaiting, autoMigrate: AUTO_MIGRATE,
   });
@@ -274,10 +275,15 @@ async function consumeLoop(heavy: boolean, slots: number) {
 }
 
 async function main() {
-  // 启动自检：数据库不可达时立刻退出并给出可读原因，
-  // 而不是卡在报错循环里 —— 那会让容器僵死、SIGTERM 也叫不动
+  // 启动自检：只验证数据库可达，不执行 DDL。
+  // AUTO_MIGRATE=0（生产默认）时 Worker 完全不碰 schema，
+  // 用只读 / 仅 DML 权限的账号也能正常启动并待命。
   try {
-    await ensureSchema();
+    if (AUTO_MIGRATE) {
+      await ensureSchema();
+    } else {
+      await db().execute("SELECT 1");
+    }
   } catch (e: any) {
     log(`❌ 数据库不可用，Worker 无法启动：${String(e?.message || e).slice(0, 200)}`);
     log("   请检查 DATABASE_URL 是否正确、数据库是否可从本容器访问。");
@@ -287,6 +293,10 @@ async function main() {
     await closeDb();
     process.exit(1);
   }
+
+  // 存活上报先启动：待命期间也要上报（schema_waiting=true、容量 0），
+  // 否则 readiness 看不到这个 Worker，运维无法判断「它活着但在等 schema」
+  const aliveTask = aliveLoop();
 
   // schema 自检：等待 schema 就绪，而不是退出。
   // 立即 exit(1) 配合编排平台的重启策略会形成崩溃循环 ——
@@ -323,7 +333,7 @@ async function main() {
     consumeLoop(true, HEAVY_SLOTS),
     consumeLoop(false, LIGHT_SLOTS),
     reclaimLoop(),
-    aliveLoop(),
+    aliveTask,        // 已在 waitForSchema 之前启动
   ]);
 }
 

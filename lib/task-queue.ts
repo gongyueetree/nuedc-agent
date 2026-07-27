@@ -1,4 +1,4 @@
-import { db, ensureSchema, withTransaction } from "./db";
+import { db, withTransaction } from "./db";
 import { commitQuota, refundQuota } from "./usage";
 
 /** 任务队列：原子认领、租约续期、崩溃回收、死信。
@@ -29,7 +29,6 @@ export interface ClaimedTask {
 
 /** 原子认领一个任务。concurrencyClass 为空时不限类型。 */
 export async function claimTask(workerId: string, opts: { heavy?: boolean } = {}): Promise<ClaimedTask | null> {
-  await ensureSchema();
   // queue_name 记录的是 concurrencyClass（light/heavy）
   const filter = opts.heavy === undefined ? "" : "AND queue_name = ?";
   const args: any[] = [];
@@ -67,13 +66,12 @@ export async function heartbeat(taskId: string, workerId: string): Promise<boole
 }
 
 /** 回收失联任务：租约过期的 running 任务重新入队；超过重试上限进死信。 */
-/** 单批回收上限。积压几千条时一次性处理会形成超长事务，
- *  长时间持锁阻塞正常认领，还可能撑爆 WAL。 */
+/** 单批回收的**总**条数上限（重新入队 + 死信合计，不是每类各 N 条）。
+ *  积压几千条时一次性处理会形成超长事务，长时间持锁阻塞正常认领。 */
 export const RECLAIM_BATCH_SIZE = Number(process.env.RECLAIM_BATCH_SIZE || 200);
 const RECLAIM_MAX_BATCHES = 50;   // 单轮最多处理 batch × 50，避免回收循环卡死
 
 export async function reclaimExpired(): Promise<{ requeued: number; dead: number; batches: number }> {
-  await ensureSchema();
 
   let requeued = 0;
   let dead = 0;
@@ -83,6 +81,7 @@ export async function reclaimExpired(): Promise<{ requeued: number; dead: number
   // FOR UPDATE SKIP LOCKED 让多个 Worker 的回收循环可以并行分担，互不阻塞。
   for (; batches < RECLAIM_MAX_BATCHES; batches++) {
     const done = await withTransaction(async (tx) => {
+      // 先处理可重试的，剩余额度再给死信 —— 保证单批总量不超过 RECLAIM_BATCH_SIZE
       const requeueRows = await tx.execute({
         sql: `UPDATE agent_tasks SET status='queued', worker_id=NULL, lease_expires_at=NULL,
                 scheduled_at = now() + interval '5 seconds', updated_at=now()
@@ -96,18 +95,21 @@ export async function reclaimExpired(): Promise<{ requeued: number; dead: number
         args: [RECLAIM_BATCH_SIZE],
       });
 
-      const deadRows = await tx.execute({
-        sql: `UPDATE agent_tasks SET status='dead', worker_id=NULL, lease_expires_at=NULL,
-                dead_reason='Worker 失联且已达最大重试次数', completed_at=now(), updated_at=now()
-              WHERE task_id IN (
-                SELECT task_id FROM agent_tasks
-                WHERE status='running' AND lease_expires_at < now() AND attempts >= max_attempts
-                ORDER BY lease_expires_at
-                LIMIT ? FOR UPDATE SKIP LOCKED
-              )
-              RETURNING task_id, owner_ref, quota_ref, quota_kind`,
-        args: [RECLAIM_BATCH_SIZE],
-      });
+      const remaining = RECLAIM_BATCH_SIZE - requeueRows.rows.length;
+      const deadRows = remaining > 0
+        ? await tx.execute({
+            sql: `UPDATE agent_tasks SET status='dead', worker_id=NULL, lease_expires_at=NULL,
+                    dead_reason='Worker 失联且已达最大重试次数', completed_at=now(), updated_at=now()
+                  WHERE task_id IN (
+                    SELECT task_id FROM agent_tasks
+                    WHERE status='running' AND lease_expires_at < now() AND attempts >= max_attempts
+                    ORDER BY lease_expires_at
+                    LIMIT ? FOR UPDATE SKIP LOCKED
+                  )
+                  RETURNING task_id, owner_ref, quota_ref, quota_kind`,
+            args: [remaining],
+          })
+        : { rows: [] as any[] };
 
       // 同事务内返还：任一笔失败则本批整体回滚，不会出现「已 dead 但配额仍 reserved」
       for (const r of deadRows.rows as any[]) {
@@ -237,7 +239,6 @@ export async function failTask(opts: {
 
 /** 队列概览 */
 export async function queueStats() {
-  await ensureSchema();
   const rs = await db().execute({
     sql: `SELECT status, priority, COUNT(*) n,
             COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(started_at, now()) - created_at))), 0) avg_wait
@@ -263,8 +264,9 @@ export async function reportWorkerAlive(info: {
   workerId: string; heavySlots: number; lightSlots: number; inFlight: number;
   driver?: string; schemaWaiting?: boolean; autoMigrate?: boolean;
 }): Promise<void> {
+  // 不调 ensureSchema：心跳是高频路径，且只读账号 / AUTO_MIGRATE=0 的 Worker
+  // 必须能在不执行 DDL 的前提下上报存活
   try {
-    await ensureSchema();
     await db().execute({
       sql: `INSERT INTO worker_heartbeats (worker_id, started_at, last_seen, heavy_slots, light_slots,
               in_flight, driver, schema_waiting, auto_migrate)
@@ -301,7 +303,6 @@ export interface WorkerStatus {
 
 /** 当前存活的 Worker 概览。live 是判断「任务能不能被消费」的唯一依据。 */
 export async function workerStatus(): Promise<WorkerStatus> {
-  await ensureSchema();
   const rs = await db().execute({
     sql: `SELECT worker_id, last_seen, heavy_slots, light_slots, in_flight,
             COALESCE(schema_waiting, 0) AS schema_waiting,
@@ -312,15 +313,17 @@ export async function workerStatus(): Promise<WorkerStatus> {
   });
   const rows = rs.rows as any[];
   const alive = rows.filter((r) => !r.stale);
+  // 待命中的 Worker 存活但不认领任务 —— 计入 live/capacity 会让
+  // 压测前置检查与运维面板误判「有 Worker 可用」
+  const available = alive.filter((r) => Number(r.schema_waiting) !== 1);
   return {
-    live: alive.length,
+    live: available.length,
     total: rows.length,
     capacity: {
-      heavy: alive.reduce((a, r) => a + Number(r.heavy_slots || 0), 0),
-      light: alive.reduce((a, r) => a + Number(r.light_slots || 0), 0),
+      heavy: available.reduce((a, r) => a + Number(r.heavy_slots || 0), 0),
+      light: available.reduce((a, r) => a + Number(r.light_slots || 0), 0),
     },
-    inFlight: alive.reduce((a, r) => a + Number(r.in_flight || 0), 0),
-    // 因 schema 不兼容而待命的 Worker 不计入可用容量
+    inFlight: available.reduce((a, r) => a + Number(r.in_flight || 0), 0),
     schemaWaiting: alive.filter((r) => Number(r.schema_waiting) === 1).length,
     autoMigrateEnabled: alive.some((r) => Number(r.auto_migrate) === 1),
     workers: rows.map((r) => ({
@@ -352,7 +355,6 @@ export async function bumpWorkerMetric(workerId: string, metric: string, lastErr
 }
 
 export async function workerMetrics(): Promise<Record<string, { count: number; last_error: string | null; last_at: string }>> {
-  await ensureSchema();
   const rs = await db().execute({
     sql: `SELECT metric, SUM(count) AS count, MAX(last_at) AS last_at,
             (ARRAY_AGG(last_error ORDER BY last_at DESC))[1] AS last_error

@@ -559,68 +559,68 @@ ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS auto_migrate INTEGER DEFA
 ];
 
 let applied = false;
-/** 进程内互斥：并发调用共享同一次执行，避免同一进程重复跑 DDL */
+/** 进程内互斥：并发调用共享同一次执行 */
 let inflight: Promise<void> | null = null;
 
-/** PostgreSQL advisory lock 编号。跨实例互斥用：
- *  多个 Web/Worker 实例同时启动时，只有拿到锁的那个执行迁移，
- *  其余等待其完成后直接看到已迁移的结果。
- *  数值任意但必须全局唯一，这里取项目名的稳定哈希。 */
+/** PostgreSQL advisory lock 编号，跨实例互斥用。 */
 const MIGRATION_LOCK_ID = 774_211_903;
 
-/** 仅供 Worker 自愈路径使用：清除「本进程已执行迁移」的缓存。
- *  不要在业务代码里调用 —— 绕过缓存意味着每次都要重新走一遍锁与全量检查。
- *  @internal */
+/** 迁移必须在单一有状态连接上完成的原因：
+ *  db().execute 不保证连接一致 —— Neon HTTP 每次都是独立请求，
+ *  pg Pool.query 每次也可能取到不同连接。若 lock / DDL / unlock 落在不同会话，
+ *  advisory lock 形同虚设，跨实例互斥不成立。
+ *  因此这里要求调用方提供「同一连接」的执行器。 */
+export interface TxRunner {
+  <T>(fn: (tx: { execute: (s: any) => Promise<{ rows: any[] }> }) => Promise<T>): Promise<T>;
+}
+
+/** 仅供 Worker 自愈路径使用。@internal */
 export function resetMigrationCache(): void {
   applied = false;
   inflight = null;
 }
 
-export async function ensureMigrations(exec: Executor, opts: { force?: boolean } = {}): Promise<void> {
+/** 执行迁移。
+ *  @param runTx 事务执行器，必须保证回调内所有语句跑在同一连接上
+ *  @param opts.force 绕过进程内缓存（仍然经过跨实例锁） */
+export async function ensureMigrations(runTx: TxRunner, opts: { force?: boolean } = {}): Promise<void> {
   if (applied && !opts.force) return;
-
-  // 进程内互斥：并发调用复用同一个 Promise。
-  // force 同样要走这里 —— 否则两个待命循环可能同时执行 DDL。
   if (inflight) return inflight;
-
-  inflight = runMigrations(exec).finally(() => { inflight = null; });
+  inflight = runMigrations(runTx).finally(() => { inflight = null; });
   return inflight;
 }
 
-async function runMigrations(exec: Executor): Promise<void> {
-  const c = exec;
+async function runMigrations(runTx: TxRunner): Promise<void> {
+  await runTx(async (tx) => {
+    // pg_advisory_xact_lock：事务级锁，提交/回滚时自动释放。
+    // 相比会话级锁，不需要手动 unlock，也不会因异常路径而泄漏。
+    // 拿不到锁会阻塞等待，保证同一时刻只有一个实例执行迁移。
+    try {
+      await tx.execute({ sql: "SELECT pg_advisory_xact_lock(?)", args: [MIGRATION_LOCK_ID] });
+    } catch (e: any) {
+      // fail closed：拿不到跨实例锁就不执行迁移，
+      // 绝不降级为「只有进程内锁」—— 那会让多实例并发跑 DDL
+      throw new Error(
+        `无法获取迁移锁（${String(e?.message || e).slice(0, 120)}）。` +
+        `迁移需要跨实例互斥，拒绝在无锁保护下执行 DDL。`,
+      );
+    }
 
-  // 跨实例互斥：advisory lock 由数据库会话持有，
-  // 拿不到锁就阻塞等待，确保同一时刻只有一个执行者。
-  // pg_advisory_lock 在会话结束时自动释放，即使进程崩溃也不会永久占锁。
-  let locked = false;
-  try {
-    await c.execute({ sql: "SELECT pg_advisory_lock(?)", args: [MIGRATION_LOCK_ID] });
-    locked = true;
-  } catch {
-    // 不支持 advisory lock 的环境（如某些代理/内存库）降级为仅进程内互斥
-  }
-
-  try {
-    await c.execute(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    await tx.execute(`CREATE TABLE IF NOT EXISTS schema_migrations (
       id INTEGER PRIMARY KEY, name TEXT, applied_at TIMESTAMPTZ DEFAULT now()
     )`);
-    const rs = await c.execute("SELECT id FROM schema_migrations");
-    const done = new Set(rs.rows.map((r) => Number(r.id)));
+    const rs = await tx.execute("SELECT id FROM schema_migrations");
+    const done = new Set(rs.rows.map((r: any) => Number(r.id)));
 
     for (const m of MIGRATIONS) {
       if (done.has(m.id)) continue;
-      for (const stmt of m.sql.split(";").map((s) => s.trim()).filter(Boolean)) {
-        await c.execute(stmt);
+      for (const stmt of m.sql.split(";").map((x) => x.trim()).filter(Boolean)) {
+        await tx.execute(stmt);
       }
-      await c.execute({ sql: "INSERT INTO schema_migrations (id, name) VALUES (?, ?)", args: [m.id, m.name] });
+      await tx.execute({ sql: "INSERT INTO schema_migrations (id, name) VALUES (?, ?)", args: [m.id, m.name] });
     }
+  });
 
-    // 只有全部成功才标记已完成；中途抛错时 applied 保持 false，下次会重试
-    applied = true;
-  } finally {
-    if (locked) {
-      await c.execute({ sql: "SELECT pg_advisory_unlock(?)", args: [MIGRATION_LOCK_ID] }).catch(() => {});
-    }
-  }
+  // 事务提交成功后才标记；中途抛错时 applied 保持 false
+  applied = true;
 }

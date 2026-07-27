@@ -190,9 +190,23 @@ import { ensureMigrations } from "./migrations";
 
 export { SCHEMA_SQL } from "./schema-sql";
 
+/** 执行数据库迁移。会获取跨实例锁并执行 DDL —— 
+ *  只读账号或无迁移授权的进程不应调用，改用 checkSchemaColumns()。 */
 export async function ensureSchema(opts: { force?: boolean } = {}) {
-  // 静态导入：动态 import 在 data-URL 入口下无法解析相对路径
-  await ensureMigrations(db(), opts);
+  // 传入 withTransaction 而非 db()：advisory lock、DDL、migration record
+  // 必须落在同一连接上，否则跨实例互斥不成立
+  await ensureMigrations(withTransaction, opts);
+}
+
+/** 只读的 schema 兼容性检查，不触发任何 DDL。
+ *  供 WORKER_AUTO_MIGRATE=0 的 Worker 与只读账号使用。 */
+export async function checkSchemaColumns(table: string, required: string[]): Promise<string[]> {
+  const rs = await db().execute({
+    sql: "SELECT column_name FROM information_schema.columns WHERE table_name=?",
+    args: [table],
+  });
+  const have = new Set(rs.rows.map((r: any) => String(r.column_name)));
+  return required.filter((c) => !have.has(c));
 }
 
 export function uid(prefix: string): string {

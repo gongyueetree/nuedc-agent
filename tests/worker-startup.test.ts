@@ -188,25 +188,28 @@ describe("待命自愈的有效性", () => {
     const { ensureMigrations, resetMigrationCache } = await import("../lib/migrations");
     expect(typeof resetMigrationCache).toBe("function");
 
-    let stmts = 0;
-    const exec = {
-      async execute(s: any) {
-        const sql = typeof s === "string" ? s : s.sql;
-        if (/SELECT id FROM schema_migrations/.test(sql)) return { rows: [] };
-        if (/^\s*(CREATE|ALTER|UPDATE|INSERT)/i.test(sql)) stmts++;
-        return { rows: [] };
-      },
+    let txCount = 0;
+    // TxRunner 语义：每次调用开一个事务，回调内共享同一连接
+    const runTx = async <T,>(fn: (tx: any) => Promise<T>): Promise<T> => {
+      txCount++;
+      return fn({
+        async execute(stmt: any) {
+          const sql = typeof stmt === "string" ? stmt : stmt.sql;
+          if (/SELECT id FROM schema_migrations/.test(sql)) return { rows: [] };
+          return { rows: [] };
+        },
+      });
     };
+
     resetMigrationCache();
-    await ensureMigrations(exec as any);
-    const first = stmts;
-    expect(first).toBeGreaterThan(0);
+    await ensureMigrations(runTx as any);
+    expect(txCount).toBe(1);
 
-    await ensureMigrations(exec as any);                    // 缓存生效
-    expect(stmts).toBe(first);
+    await ensureMigrations(runTx as any);                  // 缓存命中，不再开事务
+    expect(txCount).toBe(1);
 
-    await ensureMigrations(exec as any, { force: true });    // 强制重跑
-    expect(stmts).toBeGreaterThan(first);
+    await ensureMigrations(runTx as any, { force: true });  // 强制重跑
+    expect(txCount).toBe(2);
     resetMigrationCache();
   });
 });
