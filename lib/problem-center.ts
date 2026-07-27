@@ -146,14 +146,24 @@ export async function saveExtraction(versionId: string, data: {
   }
   if (data.requirements) {
     await db().execute({ sql: "DELETE FROM problem_requirements WHERE version_id=?", args: [versionId] });
+    // requirement_no 上有唯一索引 idx_preq_no。模型在同一次输出里可能给出
+    // 重复或空的编号（实测 2025 A 题即因此整题失败），这里去重补号。
+    const seen = new Set<string>();
     let i = 0;
     for (const r of data.requirements) {
       i++;
+      let no = String(r.id || r.requirement_no || "").trim() || `REQ-${String(i).padStart(3, "0")}`;
+      if (seen.has(no)) {
+        let n = 2;
+        while (seen.has(`${no}-${n}`)) n++;
+        no = `${no}-${n}`;
+      }
+      seen.add(no);
       await db().execute({
         sql: `INSERT INTO problem_requirements (req_id, version_id, requirement_no, type, description, target, unit,
                 tolerance, priority, verification_method, source_page, source_quote, status, sort_order)
               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        args: [uid("PRQ"), versionId, r.id || r.requirement_no || `REQ-${String(i).padStart(3, "0")}`,
+        args: [uid("PRQ"), versionId, no,
           r.type || null, r.description || "", r.target != null ? String(r.target) : null, r.unit || null,
           r.tolerance || null, r.priority || "mandatory", r.verification_method || null,
           r.source_page != null ? Number(r.source_page) : null, r.source_quote || r.source || null,

@@ -466,3 +466,36 @@ describe("历届应用可跳转赛题", () => {
     expect(src).toContain("该题尚未提取结构化需求");
   });
 });
+
+describe("提取保存的健壮性", () => {
+  it("重跑提取先清空旧需求，避免编号撞唯一约束", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/problem-center.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function saveExtraction"));
+    // idx_preq_no 是 (version_id, requirement_no) 唯一索引
+    expect(fn).toContain("DELETE FROM problem_requirements WHERE version_id=?");
+  });
+
+  it("模型输出的重复或空编号自动补号", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/problem-center.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function saveExtraction"));
+    expect(fn).toContain("const seen = new Set<string>()");
+    expect(fn).toContain("模型在同一次输出里可能给出");
+  });
+
+  it("评分项为空时区分「题面无评分表」与「提取失败」", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/batch-extract.mts", "utf8");
+    expect(src).toContain("noScoringSource");
+    expect(src).toContain("这是导入数据的限制，不是提取失败");
+    expect(src).toContain("可在后台上传 PDF 重新提取以补全评分项");
+  });
+
+  it("抽查工具标记未在原文出现的数值", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/inspect-extraction.mts", "utf8");
+    expect(src).toContain("未在题面原文中出现，请核对");
+    expect(src).toContain("有无编造");
+  });
+});

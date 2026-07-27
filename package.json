@@ -25,7 +25,8 @@
     "check-problems": "tsx scripts/check-problems.mts",
     "dedupe-problems": "tsx scripts/dedupe-problems.mts",
     "fix-contest-type": "tsx scripts/fix-contest-type.mts",
-    "batch-extract": "tsx scripts/batch-extract.mts"
+    "batch-extract": "tsx scripts/batch-extract.mts",
+    "inspect-extraction": "tsx scripts/inspect-extraction.mts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

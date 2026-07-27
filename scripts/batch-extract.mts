@@ -91,7 +91,9 @@ async function pickTargets(): Promise<Target[]> {
   return list;
 }
 
-async function extractOne(t: Target): Promise<{ ok: boolean; reqs: number; items: number; error?: string }> {
+async function extractOne(t: Target): Promise<{
+  ok: boolean; reqs: number; items: number; error?: string; noScoringSource?: boolean;
+}> {
   const v = await db().execute({
     sql: "SELECT raw_text FROM problem_versions WHERE version_id=?",
     args: [t.version_id],
@@ -117,6 +119,10 @@ async function extractOne(t: Target): Promise<{ ok: boolean; reqs: number; items
   const items = Array.isArray(out.scoring_items) ? out.scoring_items : [];
   if (!reqs.length) return { ok: false, reqs: 0, items: 0, error: "未提取到任何需求" };
 
+  // 题面本身没有评分表时，评分项为空是数据源的限制而非提取失败 ——
+  // eetree 导出的评审标准填充率仅 3%，完整评分表在官方 PDF 里
+  const hasScoringText = /评分|分值|满分|\d+\s*分/.test(raw);
+
   await saveExtraction(t.version_id, {
     rawText: raw,
     requirements: reqs,
@@ -125,7 +131,7 @@ async function extractOne(t: Target): Promise<{ ok: boolean; reqs: number; items
     ambiguities: Array.isArray(out.notes) ? out.notes : [],
   });
 
-  return { ok: true, reqs: reqs.length, items: items.length };
+  return { ok: true, reqs: reqs.length, items: items.length, noScoringSource: !hasScoringText };
 }
 
 async function main() {
@@ -157,7 +163,7 @@ async function main() {
   const mock = process.env.ENABLE_MOCK_PROVIDER === "1";
   if (mock) console.log("⚠ ENABLE_MOCK_PROVIDER=1，本次使用 mock 模型，结果不可用于生产\n");
 
-  let ok = 0, failed = 0;
+  let ok = 0, failed = 0, noScoring = 0;
   const failures: string[] = [];
   const queue = [...targets];
 
@@ -171,7 +177,10 @@ async function main() {
         const r = await extractOne(t);
         if (r.ok) {
           ok++;
-          console.log(`  ✓ ${label} → 需求 ${r.reqs} 条、评分项 ${r.items} 项`);
+          if (r.noScoringSource) noScoring++;
+          const scoringNote = r.items > 0 ? `、评分项 ${r.items} 项`
+            : r.noScoringSource ? "（题面无评分表，需补 PDF）" : "、评分项 0 项";
+          console.log(`  ✓ ${label} → 需求 ${r.reqs} 条${scoringNote}`);
         } else {
           failed++;
           failures.push(`${label}：${r.error}`);
@@ -191,6 +200,10 @@ async function main() {
   const mins = ((Date.now() - started) / 60000).toFixed(1);
 
   console.log(`\n完成：成功 ${ok} 题、失败 ${failed} 题，耗时 ${mins} 分钟`);
+  if (noScoring) {
+    console.log(`\n其中 ${noScoring} 题的题面不含评分表 —— 这是导入数据的限制，不是提取失败。`);
+    console.log("完整评分标准在官方 PDF 里；这些题可在后台上传 PDF 重新提取以补全评分项。");
+  }
   if (failures.length) {
     console.log("\n失败明细：");
     for (const f of failures.slice(0, 15)) console.log(`  ${f}`);
