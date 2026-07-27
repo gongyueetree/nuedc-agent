@@ -397,3 +397,72 @@ describe("模块采购与赛题关联", () => {
     expect(src).toContain("可以先把题面粘贴到下方对话框");
   });
 });
+
+describe("批量提取脚本", () => {
+  it("默认跳过已提取的题，可安全续跑", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/batch-extract.mts", "utf8");
+    expect(src).toContain("if (!REDO) list = list.filter((t) => t.req_count === 0)");
+    expect(src).toContain("已成功的会自动跳过");
+  });
+
+  it("提取结果不自动发布，必须人工确认", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/batch-extract.mts", "utf8");
+    expect(src).toContain("不自动发布");
+    expect(src).toContain("逐条确认后发布");
+    expect(src).not.toMatch(/publishVersion|status='published'/);
+  });
+
+  it("使用已配 requiresHumanReview 的任务类型", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/batch-extract.mts", "utf8");
+    expect(src).toContain('taskType: "PROBLEM_STRUCTURE"');
+    const policy = fs.readFileSync("lib/model-gateway/task-policy.ts", "utf8");
+    expect(policy).toMatch(/PROBLEM_STRUCTURE[\s\S]{0,200}requiresHumanReview: true/);
+  });
+
+  it("提示词禁止编造数值", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/batch-extract.mts", "utf8");
+    expect(src).toContain("不确定就留空，绝不编造");
+    expect(src).toContain("原文没写的指标、数值、条件一律不填");
+  });
+
+  it("--dry 不调用模型并预估调用次数", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/batch-extract.mts", "utf8");
+    expect(src).toContain("预估模型调用");
+    expect(src).toContain("未调用模型也未写库");
+  });
+
+  it("并发受限，避免触发限流", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/batch-extract.mts", "utf8");
+    expect(src).toContain('Math.min(Number(val("--concurrency") || 2), 4)');
+  });
+});
+
+describe("历届应用可跳转赛题", () => {
+  it("关联题库的可点击，手工填写的只作展示", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-core.tsx", "utf8");
+    expect(src).toContain("onOpenProblem?.(c.problem_id)");
+    expect(src).toContain("asset-chip static");
+  });
+
+  it("备注为空时不显示空括号", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-core.tsx", "utf8");
+    expect(src).not.toContain('（${c.note || ""}）');
+    expect(src).toContain("detail.competition_cases.some((c: any) => c.note)");
+  });
+
+  it("提供赛题速览弹窗，不跳出当前流程", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-core.tsx", "utf8");
+    expect(src).toContain("export function ProblemPeekModal");
+    expect(src).toContain("避免跳出当前选型流程");
+    expect(src).toContain("该题尚未提取结构化需求");
+  });
+});

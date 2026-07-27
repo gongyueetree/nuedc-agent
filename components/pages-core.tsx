@@ -33,6 +33,7 @@ export function ModuleThumb({ m, size }: { m: any; size?: number }) {
 /* ================= 首页 ================= */
 export function HomePage({ ctx }: { ctx: any }) {
   const [detail, setDetail] = useState<any>(null);
+  const [problemPeek, setProblemPeek] = useState<string | null>(null);
   const hot = useMemo(
     () => [...ctx.modules].sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || (b.price || 0) - (a.price || 0)).slice(0, 5),
     [ctx.modules]
@@ -102,7 +103,9 @@ export function HomePage({ ctx }: { ctx: any }) {
 
       {detail && <ModuleDetailModal detail={detail} onClose={() => setDetail(null)}
         onPick={() => { ctx.setShortlist((s: string[]) => s.includes(detail.id) ? s : [...s, detail.id]); setDetail(null); }}
-        picked={ctx.shortlist?.includes(detail.id)} />}
+        picked={ctx.shortlist?.includes(detail.id)}
+        onOpenProblem={(pid: string) => { setDetail(null); setProblemPeek(pid); }} />}
+      {problemPeek && <ProblemPeekModal problemId={problemPeek} onClose={() => setProblemPeek(null)} />}
 
       <div className="statsbar">
         <span><b>{ctx.modules.length}</b> 个结构化模块</span>
@@ -120,6 +123,7 @@ export function ModulesPage({ ctx }: { ctx: any }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("");
   const [detail, setDetail] = useState<any>(null);
+  const [problemPeek, setProblemPeek] = useState<string | null>(null);
   const list = useMemo(() => ctx.modules.filter((m: any) => {
     if (cat && !String(m.category).startsWith(cat)) return false;
     if (q) {
@@ -207,13 +211,90 @@ export function ModulesPage({ ctx }: { ctx: any }) {
 
       {detail && <ModuleDetailModal detail={detail} onClose={() => setDetail(null)}
         onPick={() => { ctx.setShortlist((sl: string[]) => sl.includes(detail.id) ? sl : [...sl, detail.id]); setDetail(null); }}
-        picked={ctx.shortlist?.includes(detail.id)} />}
+        picked={ctx.shortlist?.includes(detail.id)}
+        onOpenProblem={(pid: string) => { setDetail(null); setProblemPeek(pid); }} />}
+      {problemPeek && <ProblemPeekModal problemId={problemPeek} onClose={() => setProblemPeek(null)} />}
     </>
   );
 }
 
 /* ================= 模块详情弹窗（首页与模块选型共用） ================= */
-export function ModuleDetailModal({ detail, onClose, onPick, picked }: { detail: any; onClose: () => void; onPick?: () => void; picked?: boolean }) {
+
+/** 赛题速览。从模块详情点「历届应用」跳转而来，
+ *  只读展示题目基本信息与需求，避免跳出当前选型流程。 */
+export function ProblemPeekModal({ problemId, onClose }: { problemId: string; onClose: () => void }) {
+  const [data, setData] = useState<any>(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/problems/${problemId}`)
+      .then(async (r) => {
+        const d = await r.json().catch(() => null);
+        if (!alive) return;
+        if (!r.ok) { setErr(d?.error || `加载失败（HTTP ${r.status}）`); return; }
+        setData(d);
+      })
+      .catch((e) => alive && setErr(String(e?.message || e)));
+    return () => { alive = false; };
+  }, [problemId]);
+
+  const v = data?.version;
+  return (
+    <div className="modal-back" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 720 }}>
+        {!data && !err && <p className="hint">加载中…</p>}
+        {err && <div className="issue warning">{err}</div>}
+        {v && (
+          <>
+            <h3 style={{ marginTop: 0 }}>{v.year} 年 {v.code} 题 · {v.title}</h3>
+            <p className="hint" style={{ marginTop: -4 }}>
+              {v.group_name || "未标注组别"} · 版本 v{v.version_no} · {v.status}
+            </p>
+
+            {data.requirements?.length > 0 ? (
+              <>
+                <h4>结构化需求（{data.requirements.length} 条）</h4>
+                <div style={{ maxHeight: 300, overflow: "auto" }}>
+                  {data.requirements.map((r: any) => (
+                    <div key={r.req_id} className="req-item">
+                      <span className="rid">{r.requirement_no}</span>
+                      <span style={{ flex: 1 }}>{r.description}</span>
+                      {r.target != null && (
+                        <span className="hint">{r.target}{r.unit || ""}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : v.raw_text ? (
+              <>
+                <h4>题面原文</h4>
+                <pre style={{
+                  whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.7,
+                  maxHeight: 320, overflow: "auto", padding: 10,
+                  background: "#f7f8fa", borderRadius: 8,
+                }}>{String(v.raw_text).slice(0, 4000)}</pre>
+                <p className="hint">该题尚未提取结构化需求。</p>
+              </>
+            ) : (
+              <p className="hint">该题尚无题面内容。</p>
+            )}
+
+            <div style={{ textAlign: "right", marginTop: 12 }}>
+              <button className="btn ghost sm" onClick={onClose}>关闭</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function ModuleDetailModal({ detail, onClose, onPick, picked, onOpenProblem }: {
+  detail: any; onClose: () => void; onPick?: () => void; picked?: boolean;
+  onOpenProblem?: (problemId: string) => void;
+}) {
   return (
     <div className="modal-mask" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -247,7 +328,31 @@ export function ModuleDetailModal({ detail, onClose, onPick, picked }: { detail:
         <p className="hint">供电 {detail.power?.input_voltage_range?.join("~") || "—"}V · 典型电流 {detail.power?.typical_current_ma ?? "—"}mA{detail.power?.peak_current_ma ? ` · 峰值 ${detail.power.peak_current_ma}mA` : ""}</p>
         {detail.usage_notes?.length > 0 && (<><h4>使用要点</h4><ul>{detail.usage_notes.map((n: string) => <li key={n}>{n}</li>)}</ul></>)}
         {detail.known_issues?.length > 0 && (<><h4>已知坑点</h4>{detail.known_issues.map((n: string) => <div key={n} className="issue warning">⚠ {n}</div>)}</>)}
-        {detail.competition_cases?.length > 0 && (<><h4>历届应用</h4><p className="hint">{detail.competition_cases.map((c: any) => `${c.year} ${c.problem}（${c.note || ""}）`).join("；")}</p></>)}
+        {detail.competition_cases?.length > 0 && (
+          <>
+            <h4>历届应用</h4>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {detail.competition_cases.map((c: any, i: number) => {
+                const label = `${c.year} ${c.problem}`;
+                // 关联到题库的可以点开看题目详情；手工填写的只作展示
+                return c.problem_id ? (
+                  <button key={i} className="asset-chip" title={c.note || "查看该赛题详情"}
+                    onClick={() => onOpenProblem?.(c.problem_id)}>
+                    🏆 {label} ↗
+                  </button>
+                ) : (
+                  <span key={i} className="asset-chip static" title={c.note || ""}>🏆 {label}</span>
+                );
+              })}
+            </div>
+            {detail.competition_cases.some((c: any) => c.note) && (
+              <p className="hint" style={{ margin: "6px 0 0" }}>
+                {detail.competition_cases.filter((c: any) => c.note)
+                  .map((c: any) => `${c.year} ${c.problem}：${c.note}`).join("；")}
+              </p>
+            )}
+          </>
+        )}
         {detail.evidence_records?.length > 0 && (
           <><h4>参数证据</h4><table className="data"><thead><tr><th>参数</th><th>实测</th><th>等级</th><th>条件</th></tr></thead>
             <tbody>{detail.evidence_records.map((e: any, i: number) => (
@@ -262,28 +367,31 @@ export function ModuleDetailModal({ detail, onClose, onPick, picked }: { detail:
           || detail.code_repositories?.length) && !detail.assets_locked && (
           <>
             <h4>资料与来源</h4>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, fontSize: 13 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               {detail.datasheet_url && (
-                <a href={detail.datasheet_url} target="_blank" rel="noopener noreferrer">📄 数据手册 ↗</a>
+                <a className="asset-chip" href={detail.datasheet_url} target="_blank" rel="noopener noreferrer">
+                  📄 数据手册 ↗
+                </a>
               )}
               {detail.purchase_url && (
-                <a href={detail.purchase_url} target="_blank" rel="noopener noreferrer">
-                  🛒 {detail.purchase_platform || "购买"} ↗
+                <a className="asset-chip buy" href={detail.purchase_url} target="_blank" rel="noopener noreferrer"
+                  title={detail.purchase_url}>
+                  🛒 {(detail.purchase_platform || "购买页").slice(0, 14)} ↗
                 </a>
               )}
               {(detail.schematic_assets || []).map((u: string, i: number) => (
-                <a key={`sch${i}`} href={u} target="_blank" rel="noopener noreferrer">
-                  📐 原理图{(detail.schematic_assets.length > 1 ? ` ${i + 1}` : "")} ↗
+                <a key={`sch${i}`} className="asset-chip" href={u} target="_blank" rel="noopener noreferrer">
+                  📐 原理图{detail.schematic_assets.length > 1 ? ` ${i + 1}` : ""} ↗
                 </a>
               ))}
               {(detail.pcb_assets || []).map((u: string, i: number) => (
-                <a key={`pcb${i}`} href={u} target="_blank" rel="noopener noreferrer">
-                  🧩 PCB{(detail.pcb_assets.length > 1 ? ` ${i + 1}` : "")} ↗
+                <a key={`pcb${i}`} className="asset-chip" href={u} target="_blank" rel="noopener noreferrer">
+                  🧩 PCB{detail.pcb_assets.length > 1 ? ` ${i + 1}` : ""} ↗
                 </a>
               ))}
               {(detail.code_repositories || []).map((u: string, i: number) => (
-                <a key={`repo${i}`} href={u} target="_blank" rel="noopener noreferrer">
-                  💾 代码仓库{(detail.code_repositories.length > 1 ? ` ${i + 1}` : "")} ↗
+                <a key={`repo${i}`} className="asset-chip" href={u} target="_blank" rel="noopener noreferrer">
+                  💾 代码仓库{detail.code_repositories.length > 1 ? ` ${i + 1}` : ""} ↗
                 </a>
               ))}
             </div>

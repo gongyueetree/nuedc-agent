@@ -455,3 +455,17 @@ textarea.area {
   width: 100%; aspect-ratio: 1 / 1; object-fit: contain;
   background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 6px;
 }
+
+/* 资料链接与历届应用：统一成可点击的小标签，比一行下划线链接更清晰 */
+.asset-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 10px; font-size: 12.5px; line-height: 1.2;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: #fff; color: var(--ink); text-decoration: none;
+  cursor: pointer; transition: background .15s, border-color .15s;
+}
+.asset-chip:hover { background: #f4f7ff; border-color: var(--brand); color: var(--brand); }
+.asset-chip.buy:hover { background: #fff7ed; border-color: #f59e0b; color: #b45309; }
+/* 未关联题库的历届应用只作展示，不给点击态 */
+.asset-chip.static { cursor: default; background: #f7f8fa; color: var(--muted); }
+.asset-chip.static:hover { background: #f7f8fa; border-color: var(--line); color: var(--muted); }
