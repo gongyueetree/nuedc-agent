@@ -23,6 +23,7 @@ export const CATEGORY_TREE: CategoryGroup[] = [
     { key: "signal.vga", label: "程控增益 VGA" },
     { key: "signal.opamp", label: "运放 / 前级" },
     { key: "signal.filter", label: "滤波器" },
+    { key: "signal.clock", label: "时钟与定时" },
     { key: "signal.other", label: "其他调理" },
   ]},
   { key: "adc", label: "数据转换", icon: "🎚️", children: [
@@ -52,12 +53,17 @@ export const CATEGORY_TREE: CategoryGroup[] = [
     { key: "power.ldo", label: "LDO / 线性" },
     { key: "power.reference", label: "基准源" },
     { key: "power.inverter", label: "逆变 / 功率级" },
+    { key: "power.battery", label: "电池 / 充电管理" },
+    { key: "power.isolation", label: "隔离电源 / 数字隔离" },
+    { key: "power.wireless", label: "无线充电" },
   ]},
   { key: "comm", label: "通信模块", icon: "📶", children: [
     { key: "comm.wireless_2g4", label: "2.4G 无线" },
     { key: "comm.wifi_ble", label: "WiFi / BLE" },
     { key: "comm.lora", label: "LoRa" },
     { key: "comm.wired", label: "有线 (CAN/RS485)" },
+    { key: "comm.optical", label: "光通信 / 红外" },
+    { key: "comm.nfc", label: "NFC / RFID" },
   ]},
   { key: "display", label: "显示与人机交互", icon: "🖥️", children: [
     { key: "display.screen", label: "屏幕 (TFT/OLED)" },
@@ -81,6 +87,7 @@ export const CATEGORY_TREE: CategoryGroup[] = [
     { key: "instrument.calibration", label: "校准 / 基准" },
   ]},
   { key: "other", label: "其他", icon: "🔲", children: [
+    { key: "other.algorithm", label: "控制算法" },
     { key: "other.mechanical", label: "机械结构 / 耗材" },
     { key: "other.misc", label: "杂项" },
   ]},
