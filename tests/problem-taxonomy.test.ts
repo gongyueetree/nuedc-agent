@@ -139,3 +139,21 @@ describe("旧 schema 兼容（迁移 21 未执行）", () => {
     expect(src).toContain("npm run db:init");
   });
 });
+
+describe("赛题中心登录态判定", () => {
+  it("以 API 返回的 staff 标志判定，而非「没报错就算登录」", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    const fn = src.slice(src.indexOf("const load = useCallback"), src.indexOf("useEffect(() => { load()"));
+    // API 对非管理员不返回 error，只是过滤掉未发布题目；
+    // 据此判定已登录会让界面显示「还没有题目」，掩盖真实原因
+    expect(fn).toContain("d.staff !== true");
+    expect(fn).toContain("setAuthed(false)");
+  });
+
+  it("API 返回 staff 字段供前端判定", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/problems/route.ts", "utf8");
+    expect(src).toContain("problems: rows, staff");
+  });
+});

@@ -21,7 +21,8 @@
     "module-images": "tsx scripts/module-images.mts",
     "import-problems": "tsx scripts/import-problems.mts",
     "fetch-eetree": "tsx scripts/fetch-eetree.mts",
-    "import-eetree": "tsx scripts/import-eetree.mts"
+    "import-eetree": "tsx scripts/import-eetree.mts",
+    "check-problems": "tsx scripts/check-problems.mts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

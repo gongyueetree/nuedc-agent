@@ -18,6 +18,9 @@ export default function ProblemCenterClient() {
   const load = useCallback(async () => {
     const d = await fetch("/api/problems?status=").then((r) => r.json()).catch(() => null);
     if (!d || d.error) { setAuthed(false); return; }
+    // API 对非管理员不报错，只是把未发布题目过滤掉 —— 若据此认为已登录，
+    // 界面会显示「还没有题目」，掩盖「其实没登录」这个真实原因
+    if (d.staff !== true) { setAuthed(false); return; }
     setList(d.problems || []);
     setTaxonomyReady(d.taxonomy_ready !== false);
     setAuthed(true);
