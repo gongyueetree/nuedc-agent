@@ -556,6 +556,19 @@ ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS schema_waiting INTEGER DE
 ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS auto_migrate INTEGER DEFAULT 0;
 `,
   },
+  {
+    id: 21,
+    name: "problem_taxonomy",
+    sql: `
+ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS contest_type TEXT DEFAULT 'national';
+ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS region TEXT;
+ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS tech_tags TEXT;
+ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS source_url TEXT;
+ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS difficulty TEXT;
+CREATE INDEX IF NOT EXISTS idx_problems_contest ON official_problems(contest_type, year);
+CREATE INDEX IF NOT EXISTS idx_problems_year_code ON official_problems(year DESC, code);
+`,
+  },
 ];
 
 let applied = false;

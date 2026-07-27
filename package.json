@@ -18,7 +18,10 @@
     "verify:docx": "tsx scripts/verify-docx.mts",
     "load-test": "tsx scripts/load-test.mts",
     "worker": "tsx scripts/agent-worker.mts",
-    "module-images": "tsx scripts/module-images.mts"
+    "module-images": "tsx scripts/module-images.mts",
+    "import-problems": "tsx scripts/import-problems.mts",
+    "fetch-eetree": "tsx scripts/fetch-eetree.mts",
+    "import-eetree": "tsx scripts/import-eetree.mts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveTier } from "@/lib/auth";
-import { listProblems, createProblem, createDraftVersion, findVersionByPdf, pdfSha256 } from "@/lib/problem-center";
+import { listProblems, createProblem, createDraftVersion, findVersionByPdf, pdfSha256, problemFacets } from "@/lib/problem-center";
 
 export const runtime = "nodejs";
 
@@ -13,8 +13,16 @@ export async function GET(req: NextRequest) {
   const rows = await listProblems({
     publishedOnly: !staff,
     year: sp.get("year") ? Number(sp.get("year")) : undefined,
+    contestType: sp.get("contest") || undefined,
+    region: sp.get("region") || undefined,
+    tech: sp.get("tech") || undefined,
+    keyword: sp.get("q") || undefined,
   });
-  return NextResponse.json({ problems: rows, staff });
+  // 分面数据供前端渲染筛选器；staff 可见未发布题目
+  const facets = sp.get("facets") === "1" ? await problemFacets(!staff) : undefined;
+  // 顶层暴露：列表为空时前端才能区分「真的没有题目」与「数据库结构落后」
+  const taxonomyReady = rows.length ? rows[0].taxonomy_ready !== false : (facets as any)?.taxonomy_ready !== false;
+  return NextResponse.json({ problems: rows, staff, facets, taxonomy_ready: taxonomyReady });
 }
 
 /** POST：工作人员创建题目。带 PDF 时同一份文件不重复解析。 */

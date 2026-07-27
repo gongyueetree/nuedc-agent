@@ -11,12 +11,16 @@ export default function ProblemCenterClient() {
   const [diffs, setDiffs] = useState<any[]>([]);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [taxonomyReady, setTaxonomyReady] = useState(true);
   const [form, setForm] = useState({ year: new Date().getFullYear(), code: "A", title: "", group_name: "本科组" });
 
   const load = useCallback(async () => {
     const d = await fetch("/api/problems?status=").then((r) => r.json()).catch(() => null);
     if (!d || d.error) { setAuthed(false); return; }
-    setList(d.problems || []); setAuthed(true);
+    setList(d.problems || []);
+    setTaxonomyReady(d.taxonomy_ready !== false);
+    setAuthed(true);
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -26,10 +30,30 @@ export default function ProblemCenterClient() {
   }
 
   async function openProblem(id: string) {
-    const d = await fetch(`/api/problems/${id}`).then((r) => r.json());
-    setSel(d.problem);
-    const dd = await fetch(`/api/problems/${id}/diffs`).then((r) => r.json()).catch(() => ({ diffs: [] }));
-    setDiffs(dd.diffs || []);
+    // 此前没有错误处理：接口报错时 d.problem 是 undefined，
+    // setSel(undefined) 后界面毫无变化，表现为「点了没反应」
+    setMsg("");
+    setLoadingId(id);
+    try {
+      const res = await fetch(`/api/problems/${id}`);
+      const d = await res.json().catch(() => null);
+      if (!res.ok) {
+        setMsg(`打开失败（HTTP ${res.status}）：${d?.error || "服务端未返回详情"}`);
+        return;
+      }
+      if (!d?.problem) {
+        setMsg("接口未返回题目内容。可能是该题尚无版本记录，或数据库结构与当前版本不一致。");
+        return;
+      }
+      setSel(d.problem);
+
+      const dd = await fetch(`/api/problems/${id}/diffs`).then((r) => r.json()).catch(() => ({ diffs: [] }));
+      setDiffs(dd.diffs || []);
+    } catch (e: any) {
+      setMsg(`打开失败：${String(e?.message || e).slice(0, 160)}`);
+    } finally {
+      setLoadingId(null);
+    }
   }
 
   async function create() {
@@ -206,10 +230,17 @@ export default function ProblemCenterClient() {
                       <td>{p.year}</td><td><b>{p.code}</b></td><td>{p.title}</td>
                       <td><span className={"chip " + (p.status === "published" ? "green" : "gold")}>{p.status}</span></td>
                       <td>{Number(p.open_diffs) > 0 ? <span className="chip red">{p.open_diffs}</span> : "—"}</td>
-                      <td><button className="btn ghost sm" onClick={() => openProblem(p.problem_id)}>打开</button></td>
+                      <td><button className="btn ghost sm" disabled={loadingId === p.problem_id}
+                        onClick={() => openProblem(p.problem_id)}>
+                        {loadingId === p.problem_id ? "打开中…" : "打开"}</button></td>
                     </tr>
                   ))}
-                  {!list.length && <tr><td colSpan={6} className="hint">还没有题目，右侧新建</td></tr>}
+                  {!list.length && <tr><td colSpan={6} className="hint">{taxonomyReady ? "还没有题目，右侧新建" : (
+                    <>
+                      ⚠ 数据库结构落后于当前版本（缺少赛题分类列），列表可能不完整。
+                      <br />请执行迁移后刷新：<code>DATABASE_URL=... npm run db:init</code>
+                    </>
+                  )}</td></tr>}
                 </tbody>
               </table>
             </div>

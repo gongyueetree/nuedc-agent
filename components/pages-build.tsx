@@ -180,6 +180,15 @@ export function BlockDiagram({ solution, ctx }: { solution: any; ctx?: any }) {
 }
 
 /* ============ 方案生成（对话式，参考 ai-hardware-genesis 渐进流程）============ */
+const CONTEST_CN: Record<string, string> = {
+  national: "国赛", provincial: "省赛", invitational: "邀请赛", practice: "练习题",
+};
+const TECH_CN: Record<string, string> = {
+  power: "电源类", signal_source: "信号源类", rf: "高频无线电", amplifier: "放大器类",
+  instrument: "仪器仪表", data_acquisition: "数据采集", control: "控制类",
+  mechatronic: "机电一体化", sensor: "传感器应用", communication: "通信类",
+};
+
 export function SolutionPage({ ctx }: { ctx: any }) {
   const [text, setText] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
@@ -995,9 +1004,17 @@ function ProblemPicker({ ctx }: { ctx: any }) {
   const picked = problems.find((p) => p.code === code);
 
   // 官方已发布题目：采用后直接得到结构化需求，零模型调用
+  const [facets, setFacets] = useState<any>(null);
+  const [filter, setFilter] = useState<{ year?: string; contest?: string; tech?: string; q?: string }>({});
+
   useEffect(() => {
-    fetch("/api/problems").then((r) => r.json()).then((d) => setOfficial(d.problems || [])).catch(() => {});
-  }, []);
+    const qs = new URLSearchParams({ facets: "1" });
+    for (const [k, v] of Object.entries(filter)) if (v) qs.set(k === "q" ? "q" : k, v);
+    fetch(`/api/problems?${qs}`)
+      .then((r) => r.json())
+      .then((d) => { setOfficial(d.problems || []); if (d.facets) setFacets(d.facets); })
+      .catch(() => {});
+  }, [filter]);
 
   async function adoptOfficial(problemId: string) {
     setBusy(true); setMsg("正在载入官方题目…");
@@ -1035,18 +1052,52 @@ function ProblemPicker({ ctx }: { ctx: any }) {
   return (
     <div className="card" style={{ marginBottom: 12 }}>
       <h3>选择赛题</h3>
-      {official.length > 0 && (
+      {(official.length > 0 || facets) && (
         <div style={{ marginBottom: 10 }}>
           <p className="hint" style={{ margin: "0 0 6px" }}>
             ✅ 官方标准题目（已由工作人员解析并复核，选用后直接得到结构化需求与评分项，无需等待 AI 解析）
           </p>
+
+          {facets && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8, alignItems: "center" }}>
+              <select value={filter.contest || ""} onChange={(e) => setFilter({ ...filter, contest: e.target.value })}
+                style={{ padding: "5px 8px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13 }}>
+                <option value="">全部赛事</option>
+                {facets.contestTypes?.map((c: any) => (
+                  <option key={c.value} value={c.value}>{CONTEST_CN[c.value] || c.value}（{c.count}）</option>
+                ))}
+              </select>
+              <select value={filter.year || ""} onChange={(e) => setFilter({ ...filter, year: e.target.value })}
+                style={{ padding: "5px 8px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13 }}>
+                <option value="">全部年份</option>
+                {facets.years?.map((y: any) => <option key={y.value} value={y.value}>{y.value} 年（{y.count}）</option>)}
+              </select>
+              <select value={filter.tech || ""} onChange={(e) => setFilter({ ...filter, tech: e.target.value })}
+                style={{ padding: "5px 8px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13 }}>
+                <option value="">全部方向</option>
+                {facets.tech?.map((t: any) => (
+                  <option key={t.value} value={t.value}>{TECH_CN[t.value] || t.value}（{t.count}）</option>
+                ))}
+              </select>
+              <input value={filter.q || ""} onChange={(e) => setFilter({ ...filter, q: e.target.value })}
+                placeholder="搜索题目名称"
+                style={{ padding: "5px 8px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13, width: 150 }} />
+              {(filter.contest || filter.year || filter.tech || filter.q) && (
+                <button className="btn ghost sm" onClick={() => setFilter({})}>清除</button>
+              )}
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {official.map((p) => (
               <button key={p.problem_id} className="btn ghost sm" disabled={busy}
+                title={`${CONTEST_CN[p.contest_type] || ""} · ${(p.tech_tags || []).map((t: string) => TECH_CN[t] || t).join("/")}`}
                 onClick={() => adoptOfficial(p.problem_id)}>
                 {p.year} {p.code} · {p.title}
+                {p.requirement_count > 0 && <span className="hint"> · {p.requirement_count} 条需求</span>}
               </button>
             ))}
+            {!official.length && <span className="hint">当前筛选条件下没有已发布的题目</span>}
           </div>
         </div>
       )}

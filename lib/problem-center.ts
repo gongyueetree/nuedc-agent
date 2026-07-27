@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { db, ensureSchema, uid } from "./db";
+import { parseTags, suggestTechTags, type ContestType, type TechCategory } from "./problem-taxonomy";
 
 /** 赛题中心（规范化模型）。
  *  official_problems 只存题目主体；每次发布产生不可变的 problem_versions，
@@ -19,15 +20,40 @@ export function pdfSha256(base64: string): string {
 
 export async function createProblem(input: {
   year: number; code: string; title: string; groupName?: string; createdBy: string;
+  contestType?: ContestType; region?: string; techTags?: TechCategory[]; sourceUrl?: string;
 }): Promise<string> {
   await ensureSchema();
   const id = uid("PROB");
+  // 未指定技术方向时给出建议值，仍需工程师在后台确认
+  const tags = input.techTags?.length ? input.techTags : suggestTechTags(input.title);
   await db().execute({
-    sql: `INSERT INTO official_problems (problem_id, year, code, title, group_name, status, created_by)
-          VALUES (?,?,?,?,?, 'draft', ?)`,
-    args: [id, input.year, String(input.code).toUpperCase(), input.title, input.groupName || null, input.createdBy],
+    sql: `INSERT INTO official_problems (problem_id, year, code, title, group_name, status, created_by,
+            contest_type, region, tech_tags, source_url)
+          VALUES (?,?,?,?,?, 'draft', ?,?,?,?,?)`,
+    args: [id, input.year, String(input.code).toUpperCase(), input.title, input.groupName || null,
+      input.createdBy, input.contestType || "national", input.region || null,
+      JSON.stringify(tags), input.sourceUrl || null],
   });
   return id;
+}
+
+/** 更新分类标记（工程师在后台确认时调用） */
+export async function updateTaxonomy(problemId: string, input: {
+  contestType?: ContestType; region?: string; techTags?: TechCategory[]; difficulty?: string;
+}): Promise<void> {
+  await ensureSchema();
+  const sets: string[] = [];
+  const args: any[] = [];
+  if (input.contestType) { sets.push("contest_type=?"); args.push(input.contestType); }
+  if (input.region !== undefined) { sets.push("region=?"); args.push(input.region || null); }
+  if (input.techTags) { sets.push("tech_tags=?"); args.push(JSON.stringify(input.techTags)); }
+  if (input.difficulty !== undefined) { sets.push("difficulty=?"); args.push(input.difficulty || null); }
+  if (!sets.length) return;
+  sets.push("updated_at=now()");
+  await db().execute({
+    sql: `UPDATE official_problems SET ${sets.join(", ")} WHERE problem_id=?`,
+    args: [...args, problemId],
+  });
 }
 
 /** 创建可编辑的草稿版本（已发布版本不可改，修订必须开新版本） */
@@ -433,23 +459,109 @@ export async function publishVersion(versionId: string, publishedBy: string, ove
   return { ok: true, checklist: items };
 }
 
-export async function listProblems(opts: { publishedOnly?: boolean; year?: number } = {}) {
+/** 迁移 21 之前 official_problems 没有分类列。
+ *  新代码直接 SELECT 会让整个列表查询失败、页面显示「还没有题目」，
+ *  掩盖真实原因。这里对缺列做降级，并在返回值里标明。 */
+const PG_UNDEFINED_COLUMN = "42703";
+const TAXONOMY_COLS = "p.contest_type, p.region, p.tech_tags, p.source_url, p.difficulty";
+const TAXONOMY_FALLBACK = "'national' AS contest_type, NULL AS region, NULL AS tech_tags, NULL AS source_url, NULL AS difficulty";
+
+export async function listProblems(opts: {
+  publishedOnly?: boolean;
+  year?: number;
+  contestType?: string;
+  region?: string;
+  tech?: string;
+  keyword?: string;
+} = {}) {
   await ensureSchema();
   const where: string[] = [];
   const args: any[] = [];
   if (opts.year) { where.push("p.year=?"); args.push(opts.year); }
-  const rs = await db().execute({
-    sql: `SELECT p.problem_id, p.year, p.code, p.title, p.group_name, p.status,
-            (SELECT version_no FROM problem_versions v WHERE v.problem_id=p.problem_id AND v.status='published' ORDER BY version_no DESC LIMIT 1) published_version,
-            (SELECT version_id FROM problem_versions v WHERE v.problem_id=p.problem_id AND v.status='published' ORDER BY version_no DESC LIMIT 1) published_version_id,
-            (SELECT COUNT(*) FROM problem_review_diffs d
-               JOIN problem_versions v2 ON v2.version_id = d.version_id
-               WHERE v2.problem_id = p.problem_id AND d.resolved = 0 AND d.severity='critical') open_critical
-          FROM official_problems p
-          ${where.length ? "WHERE " + where.join(" AND ") : ""}
-          ORDER BY p.year DESC, p.code ASC LIMIT 200`,
-    args,
-  });
-  const rows = rs.rows as any[];
+  if (opts.keyword) { where.push("(p.title ILIKE ? OR p.code ILIKE ?)"); args.push(`%${opts.keyword}%`, `%${opts.keyword}%`); }
+
+  // 分类相关的过滤条件只在有列时才加
+  const taxonomyWhere: string[] = [];
+  const taxonomyArgs: any[] = [];
+  if (opts.contestType) { taxonomyWhere.push("p.contest_type=?"); taxonomyArgs.push(opts.contestType); }
+  if (opts.region) { taxonomyWhere.push("p.region=?"); taxonomyArgs.push(opts.region); }
+  if (opts.tech) { taxonomyWhere.push("p.tech_tags LIKE ?"); taxonomyArgs.push(`%"${opts.tech}"%`); }
+
+  const build = (cols: string, extraWhere: string[], extraArgs: any[]) => {
+    const all = [...where, ...extraWhere];
+    return {
+      sql: `SELECT p.problem_id, p.year, p.code, p.title, p.group_name, p.status, ${cols},
+              (SELECT version_no FROM problem_versions v WHERE v.problem_id=p.problem_id AND v.status='published' ORDER BY version_no DESC LIMIT 1) published_version,
+              (SELECT version_id FROM problem_versions v WHERE v.problem_id=p.problem_id AND v.status='published' ORDER BY version_no DESC LIMIT 1) published_version_id,
+              (SELECT COUNT(*) FROM problem_requirements r
+                 JOIN problem_versions v2 ON v2.version_id = r.version_id
+                 WHERE v2.problem_id = p.problem_id AND v2.status='published') requirement_count,
+              (SELECT COUNT(*) FROM problem_review_diffs d
+                 JOIN problem_versions v3 ON v3.version_id = d.version_id
+                 WHERE v3.problem_id = p.problem_id AND d.resolved = 0 AND d.severity='critical') open_critical
+            FROM official_problems p
+            ${all.length ? "WHERE " + all.join(" AND ") : ""}
+            ORDER BY p.year DESC, p.code ASC LIMIT 500`,
+      args: [...args, ...extraArgs],
+    };
+  };
+
+  let rs: { rows: any[] };
+  let taxonomyReady = true;
+  try {
+    const q = build(TAXONOMY_COLS, taxonomyWhere, taxonomyArgs);
+    rs = await db().execute(q);
+  } catch (e: any) {
+    if (e?.code !== PG_UNDEFINED_COLUMN) throw e;
+    // 数据库结构落后于代码：降级为不含分类列的查询，让列表仍能显示
+    taxonomyReady = false;
+    rs = await db().execute(build(TAXONOMY_FALLBACK, [], []));
+  }
+
+  const rows = (rs.rows as any[]).map((r) => ({
+    ...r,
+    tech_tags: parseTags(r.tech_tags),
+    taxonomy_ready: taxonomyReady,
+  }));
   return opts.publishedOnly ? rows.filter((r) => r.published_version_id) : rows;
+}
+
+/** 检索维度的可选值与计数，供前端筛选器渲染 */
+export async function problemFacets(publishedOnly = true) {
+  await ensureSchema();
+  // 缺列时返回空分面，前端据此隐藏筛选器
+  try {
+    return await problemFacetsInner(publishedOnly);
+  } catch (e: any) {
+    if (e?.code !== PG_UNDEFINED_COLUMN) throw e;
+    return { years: [], contestTypes: [], regions: [], tech: [], taxonomy_ready: false };
+  }
+}
+
+async function problemFacetsInner(publishedOnly = true) {
+  // 用 1=1 打底，后续条件一律用 AND 拼接，避免 WHERE/AND 的字符串拼接错误
+  const cond = publishedOnly
+    ? `WHERE EXISTS (SELECT 1 FROM problem_versions v WHERE v.problem_id=p.problem_id AND v.status='published')`
+    : "WHERE 1=1";
+  const [years, contests, regions] = await Promise.all([
+    db().execute({ sql: `SELECT year, COUNT(*) n FROM official_problems p ${cond} GROUP BY year ORDER BY year DESC`, args: [] }),
+    db().execute({ sql: `SELECT contest_type, COUNT(*) n FROM official_problems p ${cond} GROUP BY contest_type`, args: [] }),
+    db().execute({
+      sql: `SELECT region, COUNT(*) n FROM official_problems p ${cond} AND region IS NOT NULL
+            GROUP BY region ORDER BY n DESC`,
+      args: [],
+    }),
+  ]);
+  // 技术方向需要展开 JSON 数组，在应用层统计
+  const all = await db().execute({ sql: `SELECT tech_tags FROM official_problems p ${cond}`, args: [] });
+  const techCount: Record<string, number> = {};
+  for (const r of all.rows as any[]) {
+    for (const t of parseTags(r.tech_tags)) techCount[t] = (techCount[t] || 0) + 1;
+  }
+  return {
+    years: (years.rows as any[]).map((r) => ({ value: Number(r.year), count: Number(r.n) })),
+    contestTypes: (contests.rows as any[]).map((r) => ({ value: String(r.contest_type), count: Number(r.n) })),
+    regions: (regions.rows as any[]).map((r) => ({ value: String(r.region), count: Number(r.n) })),
+    tech: Object.entries(techCount).map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count),
+  };
 }

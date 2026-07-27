@@ -364,3 +364,24 @@ describe("图片上传的性能与可读性", () => {
     expect(src).toContain("正在处理");
   });
 });
+
+describe("赛题中心的错误可见性", () => {
+  it("打开题目失败时给出提示，不静默无反应", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    const fn = src.slice(src.indexOf("async function openProblem"), src.indexOf("async function openProblem") + 1400);
+    // 必须检查 HTTP 状态并把服务端的 error 呈现出来
+    expect(fn).toContain("if (!res.ok)");
+    expect(fn).toContain("d?.error");
+    expect(fn).toContain("setMsg");
+    // 返回体缺 problem 时也要提示，而不是 setSel(undefined) 后毫无变化
+    expect(fn).toContain("if (!d?.problem)");
+  });
+
+  it("打开过程中按钮显示加载态", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    expect(src).toContain("loadingId");
+    expect(src).toContain("打开中…");
+  });
+});
