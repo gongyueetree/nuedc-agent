@@ -1,0 +1,56 @@
+# 手动把 data/seed-modules.json 写入线上数据库（Neon / Railway 均可）。
+#
+# 使用前提：在 repo Settings -> Secrets and variables -> Actions 里
+# 新增一个 Repository secret，名字必须是 DATABASE_URL，值填数据库连接串：
+#   Neon    -> Dashboard -> Connection string（选 pooled 或 direct 都行）
+#   Railway -> Postgres 服务 -> Variables -> DATABASE_PUBLIC_URL（要用公网那条）
+#
+# 配好后：Actions -> DB Seed -> Run workflow。
+
+name: DB Seed
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_migrations:
+        description: 先执行数据库迁移 (npm run db:init)
+        type: boolean
+        default: true
+
+concurrency:
+  group: db-seed
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Guard - DATABASE_URL must be configured
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::缺少 DATABASE_URL secret，请先在 Settings -> Secrets and variables -> Actions 中配置"
+            exit 1
+          fi
+
+      - name: Apply migrations
+        if: ${{ inputs.run_migrations }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run db:init
+
+      - name: Seed modules
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run db:seed
