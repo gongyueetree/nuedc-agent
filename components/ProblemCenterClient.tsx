@@ -202,7 +202,7 @@ export default function ProblemCenterClient() {
   }
 
   async function publishWithOverride() {
-    const unmet = (sel?.checklist || []).filter((c: any) => !c.ok).map((c: any) => c.label);
+    const unmet = (sel?.checklist?.items || []).filter((c: any) => !c.passed).map((c: any) => c.label);
     if (!confirm(
       `以下清单项未通过：\n${unmet.map((x: string) => "· " + x).join("\n")}\n\n` +
       `强制发布后学生将直接使用这份内容。发布记录会标注 override 以便追溯。\n确定继续？`
@@ -258,30 +258,33 @@ export default function ProblemCenterClient() {
                 {critical > 0 && <div className="issue blocker" style={{ marginTop: 8 }}>还有 {critical} 处关键差异（指标/分值）未确认，不能发布</div>}
 
                 {/* 发布清单逐项显示，让人知道差什么、怎么补，而不是只报一句「未通过」 */}
-                {sel.checklist && sel.status !== "published" && (
+                {sel.checklist?.items?.length > 0 && sel.status !== "published" && (
                   <div style={{ marginTop: 10 }}>
                     <p className="hint" style={{ margin: "0 0 6px" }}>发布清单</p>
-                    {sel.checklist.map((c: any) => (
+                    {(Array.isArray(sel.checklist.items) ? sel.checklist.items : []).map((c: any) => (
                       <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 13 }}>
-                        <span style={{ color: c.ok ? "var(--green, #16a34a)" : "var(--red, #dc2626)" }}>
-                          {c.ok ? "✓" : "✗"}
+                        <span style={{ color: c.passed ? "var(--green, #16a34a)" : "var(--red, #dc2626)" }}>
+                          {c.passed ? "✓" : "✗"}
                         </span>
-                        <span style={{ flex: 1, color: c.ok ? "var(--muted)" : "inherit" }}>{c.label}</span>
-                        {!c.ok && c.key === "requirements_confirmed" && (
+                        <span style={{ flex: 1, color: c.passed ? "var(--muted)" : "inherit" }}>
+                          {c.label}
+                          {c.detail && <span className="hint">　{c.detail}</span>}
+                        </span>
+                        {!c.passed && /requirement|需求/.test(c.key + c.label) && (
                           <button className="btn ghost sm" onClick={confirmAll} disabled={!!busy}>全部确认</button>
                         )}
-                        {!c.ok && c.key === "ambiguities_resolved" && (
+                        {!c.passed && /ambigu|歧义/.test(c.key + c.label) && (
                           <button className="btn ghost sm" onClick={resolveAllNotes} disabled={!!busy}>全部处理</button>
                         )}
-                        {!c.ok && c.key === "has_source_refs" && (
-                          <span className="hint">需重新提取（新版会带原文引用）</span>
+                        {!c.passed && /source|引用|页码/.test(c.key + c.label) && (
+                          <span className="hint">需重新提取</span>
                         )}
-                        {!c.ok && c.key === "reviewer_count" && (
+                        {!c.passed && /reviewer|审核/.test(c.key + c.label) && (
                           <span className="hint">需两名工作人员分别审核</span>
                         )}
                       </div>
                     ))}
-                    {sel.checklist.some((c: any) => !c.ok) && (
+                    {!sel.checklist.passed && (
                       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
                         <button className="btn ghost sm danger" onClick={publishWithOverride} disabled={!!busy}>
                           强制发布（跳过未通过项）

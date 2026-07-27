@@ -567,7 +567,7 @@ describe("发布清单的可操作性", () => {
     const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
     expect(src).toContain("publishWithOverride");
     expect(src).toContain("强制发布后学生将直接使用这份内容");
-    expect(src).toContain("发布记录会标注 override");
+    expect(src).toMatch(/发布记录会?标注 override/);
     const lib = fs.readFileSync("lib/problem-center.ts", "utf8");
     expect(lib).toContain('publishedBy + (override ? " (override)" : "")');
   });
@@ -577,5 +577,33 @@ describe("发布清单的可操作性", () => {
     const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
     const fn = src.slice(src.indexOf("async function confirmAll"), src.indexOf("async function resolveAllNotes"));
     expect(fn).toContain("请先核对数值单位与基本/发挥分类");
+  });
+});
+
+describe("发布清单渲染的健壮性", () => {
+  it("按后端实际结构读取（items 数组 + passed 字段）", async () => {
+    const fs = await import("node:fs");
+    const ui = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    // publicationChecklist 返回 { items, passed }，items 元素用 passed/detail
+    expect(ui).toContain("sel.checklist?.items?.length");
+    expect(ui).toContain("c.passed");
+    // 不得把 checklist 本身当数组 map —— 会 TypeError 导致整页白屏
+    expect(ui).not.toMatch(/sel\.checklist\.map\(/);
+    expect(ui).not.toMatch(/sel\.checklist\.some\(/);
+  });
+
+  it("map 前做数组防护，后端结构变化不至于整页崩溃", async () => {
+    const fs = await import("node:fs");
+    const ui = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    expect(ui).toContain("Array.isArray(sel.checklist.items)");
+  });
+
+  it("清单字段与 publicationChecklist 的实现一致", async () => {
+    const fs = await import("node:fs");
+    const lib = fs.readFileSync("lib/problem-center.ts", "utf8");
+    const fn = lib.slice(lib.indexOf("export async function publicationChecklist"));
+    expect(fn).toContain("return { items, passed:");
+    // 每项用 passed 而非 ok
+    expect(fn).toMatch(/items\.push\(\{[\s\S]{0,120}passed:/);
   });
 });
