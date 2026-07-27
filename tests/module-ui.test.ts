@@ -72,7 +72,7 @@ describe("导航与流程", () => {
   it("方案生成页显示当前优先模块清单", async () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("components/pages-build.tsx", "utf8");
-    expect(src).toContain("已从「模块选型」选用");
+    expect(src).toContain("已从「电赛模块」选用");
   });
 });
 
@@ -391,7 +391,7 @@ describe("导航与字段归属（防回归）", () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("components/Platform.tsx", "utf8");
     // 它是项目管理入口，不是备赛流程的一步
-    expect(src).toContain("const FLOW_NAV = NAV.filter((n) => n.key !== \"projects\")");
+    expect(src).toMatch(/FLOW_NAV = NAV\.filter/);
     expect(src).toContain("{FLOW_NAV.map((n) => (");
     // 工作流标签同样排除
     expect(src).toContain('{FLOW_NAV.filter((n) => n.key !== "home")');

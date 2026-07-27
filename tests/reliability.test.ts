@@ -585,3 +585,42 @@ describe("旧 schema 心跳兼容（迁移 20 未执行）", () => {
     expect(fn).toContain("if (e?.code !== PG_UNDEFINED_COLUMN) throw e");
   });
 });
+
+describe("关键列自愈（不依赖迁移记录）", () => {
+  it("每次 ensureMigrations 都校验关键列，不受迁移记录影响", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/migrations.ts", "utf8");
+    expect(src).toContain("CRITICAL_COLUMNS");
+    // 必须在迁移循环之后无条件执行，而不是包在 if (done.has(m.id)) 里
+    const runFn = src.slice(src.indexOf("async function runMigrations"));
+    expect(runFn).toContain("for (const stmt of CRITICAL_COLUMNS)");
+    expect(runFn).toContain("不依赖迁移记录");
+  });
+
+  it("关键列包含两次导致生产故障的 agent_tasks.org_ref", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/migrations.ts", "utf8");
+    const block = src.slice(src.indexOf("const CRITICAL_COLUMNS"), src.indexOf("let applied"));
+    expect(block).toContain("agent_tasks ADD COLUMN IF NOT EXISTS org_ref");
+    // 代码里实际会写入的列都要覆盖
+    for (const col of ["owner_ref", "quota_ref", "quota_kind", "lease_expires_at", "worker_id"]) {
+      expect(block, `关键列缺 agent_tasks.${col}`).toContain(`agent_tasks ADD COLUMN IF NOT EXISTS ${col}`);
+    }
+  });
+
+  it("全部使用 IF NOT EXISTS，对已有列零开销且可重复执行", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/migrations.ts", "utf8");
+    const block = src.slice(src.indexOf("const CRITICAL_COLUMNS"), src.indexOf("let applied"));
+    const stmts = block.match(/"ALTER TABLE[^"]+"/g) || [];
+    expect(stmts.length).toBeGreaterThan(10);
+    for (const st of stmts) expect(st, `非幂等：${st}`).toContain("IF NOT EXISTS");
+  });
+
+  it("表不存在时跳过而非中断整个迁移", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/migrations.ts", "utf8");
+    const runFn = src.slice(src.indexOf("async function runMigrations"));
+    expect(runFn).toContain("表尚未创建时跳过");
+  });
+});

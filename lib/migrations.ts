@@ -571,6 +571,30 @@ CREATE INDEX IF NOT EXISTS idx_problems_year_code ON official_problems(year DESC
   },
 ];
 
+/** 关键列的幂等补丁。任何因「已发布迁移被追加内容」而可能缺失的列都列在这里，
+ *  每次 ensureMigrations 都执行一遍 —— ADD COLUMN IF NOT EXISTS 对已有列无开销。 */
+const CRITICAL_COLUMNS = [
+  "ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS org_ref TEXT",
+  "ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS owner_ref TEXT",
+  "ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS quota_ref TEXT",
+  "ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS quota_kind TEXT",
+  "ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+  "ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS worker_id TEXT",
+  "ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
+  "ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS dead_reason TEXT",
+  "ALTER TABLE modules ADD COLUMN IF NOT EXISTS scope TEXT DEFAULT 'PUBLIC'",
+  "ALTER TABLE modules ADD COLUMN IF NOT EXISTS owner_ref TEXT",
+  "ALTER TABLE modules ADD COLUMN IF NOT EXISTS org_ref TEXT",
+  "ALTER TABLE modules ADD COLUMN IF NOT EXISTS suggested_id TEXT",
+  "ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS contest_type TEXT DEFAULT 'national'",
+  "ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS region TEXT",
+  "ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS tech_tags TEXT",
+  "ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS source_url TEXT",
+  "ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS difficulty TEXT",
+  "ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS schema_waiting INTEGER DEFAULT 0",
+  "ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS auto_migrate INTEGER DEFAULT 0",
+];
+
 let applied = false;
 /** 进程内互斥：并发调用共享同一次执行 */
 let inflight: Promise<void> | null = null;
@@ -631,6 +655,14 @@ async function runMigrations(runTx: TxRunner): Promise<void> {
         await tx.execute(stmt);
       }
       await tx.execute({ sql: "INSERT INTO schema_migrations (id, name) VALUES (?, ?)", args: [m.id, m.name] });
+    }
+
+    // 关键列自愈：不依赖迁移记录。
+    // 迁移按 id 判断是否执行过，若某个迁移在部分环境跑过之后又被追加语句，
+    // 那些环境永远补不上新列（org_ref 已因此两次导致生产故障）。
+    // 这些语句幂等且极廉价，每次启动校验一遍，代价远小于线上缺列。
+    for (const stmt of CRITICAL_COLUMNS) {
+      try { await tx.execute(stmt); } catch { /* 表尚未创建时跳过，下一轮再补 */ }
     }
   });
 
