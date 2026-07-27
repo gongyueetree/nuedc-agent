@@ -262,3 +262,54 @@ describe("未提取时的详情页可用性", () => {
     expect(src).toContain("用已入库题面提取");
   });
 });
+
+describe("选题界面不铺开全部题目", () => {
+  it("未设置筛选条件时不列出题目按钮", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-build.tsx", "utf8");
+    // 245 道题全铺开会把页面撑爆
+    expect(src).toContain("hasFilter");
+    expect(src).toContain("{!hasFilter ? (");
+    expect(src).toContain("请用上方条件筛选");
+  });
+
+  it("即使筛选后也限制显示条数", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-build.tsx", "utf8");
+    expect(src).toContain("SHOW_LIMIT");
+    expect(src).toContain("请继续缩小范围");
+  });
+
+  it("移除与新筛选器重复的旧年份/题目下拉框", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-build.tsx", "utf8");
+    expect(src).not.toContain("— 选择题目 —");
+    expect(src).not.toContain("PROBLEM_YEARS");
+    expect(src).not.toContain("PAST_PROBLEMS");
+  });
+});
+
+describe("题库去重工具", () => {
+  it("按年份+标题分组，题号不作为身份依据", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/dedupe-problems.mts", "utf8");
+    expect(src).toContain("`${r.year}|${String(r.title).trim()}`");
+    expect(src).toContain("题号会因初赛/决赛");
+  });
+
+  it("保留信息最全的一条：已发布 > 有需求 > 有版本 > 有题面", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/dedupe-problems.mts", "utf8");
+    const fn = src.slice(src.indexOf("function score"), src.indexOf("async function main"));
+    expect(fn).toContain("published > 0 ? 10000");
+    expect(fn).toContain("requirements");
+    expect(fn).toContain("has_raw");
+  });
+
+  it("默认干跑，需显式 --apply 才删除", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/dedupe-problems.mts", "utf8");
+    expect(src).toContain('APPLY = process.argv.includes("--apply")');
+    expect(src).toContain("干跑模式，未删除任何内容");
+  });
+});

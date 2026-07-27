@@ -1,6 +1,5 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { PAST_PROBLEMS, PROBLEM_YEARS } from "../data/past-problems";
 
 /** 失效横幅：仅当「该产物已存在」且「被标记 stale」时显示。
  *  产物从未生成过时提示"已过期"没有意义，反而让人以为出错了。 */
@@ -995,17 +994,16 @@ function BlockList({ sol, ctx }: { sol: any; ctx: any }) {
 
 /* ============ 赛题选择器：历年赛题 / PDF 上传 / 粘贴文本 ============ */
 function ProblemPicker({ ctx }: { ctx: any }) {
-  const [year, setYear] = useState(PROBLEM_YEARS[0]);
-  const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [official, setOfficial] = useState<any[]>([]);
-  const problems = PAST_PROBLEMS[year] || [];
-  const picked = problems.find((p) => p.code === code);
 
   // 官方已发布题目：采用后直接得到结构化需求，零模型调用
   const [facets, setFacets] = useState<any>(null);
   const [filter, setFilter] = useState<{ year?: string; contest?: string; tech?: string; q?: string }>({});
+  const SHOW_LIMIT = 40;
+  const hasFilter = !!(filter.contest || filter.year || filter.tech || (filter.q && filter.q.length >= 1));
+  const shown = official.slice(0, SHOW_LIMIT);
 
   useEffect(() => {
     const qs = new URLSearchParams({ facets: "1" });
@@ -1052,44 +1050,58 @@ function ProblemPicker({ ctx }: { ctx: any }) {
   return (
     <div className="card" style={{ marginBottom: 12 }}>
       <h3>选择赛题</h3>
-      {(official.length > 0 || facets) && (
-        <div style={{ marginBottom: 10 }}>
-          <p className="hint" style={{ margin: "0 0 6px" }}>
-            ✅ 官方标准题目（已由工作人员解析并复核，选用后直接得到结构化需求与评分项，无需等待 AI 解析）
+      {/* 官方题库选择。245 道题全铺开会把页面撑爆，
+          因此默认只显示筛选器，选定条件或搜索后才列出匹配项。 */}
+      <div className="card" style={{ padding: 12, marginBottom: 10 }}>
+        <p className="hint" style={{ margin: "0 0 8px" }}>
+          ✅ 官方标准题目（已由工作人员解析并复核，选用后直接得到结构化需求与评分项，无需等待 AI 解析）
+        </p>
+
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <select value={filter.contest || ""} onChange={(e) => setFilter({ ...filter, contest: e.target.value })}
+            style={{ padding: "6px 9px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13 }}>
+            <option value="">全部赛事</option>
+            {facets?.contestTypes?.map((c: any) => (
+              <option key={c.value} value={c.value}>{CONTEST_CN[c.value] || c.value}（{c.count}）</option>
+            ))}
+          </select>
+
+          <select value={filter.year || ""} onChange={(e) => setFilter({ ...filter, year: e.target.value })}
+            style={{ padding: "6px 9px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13 }}>
+            <option value="">全部年份</option>
+            {facets?.years?.map((y: any) => <option key={y.value} value={y.value}>{y.value} 年（{y.count}）</option>)}
+          </select>
+
+          <select value={filter.tech || ""} onChange={(e) => setFilter({ ...filter, tech: e.target.value })}
+            style={{ padding: "6px 9px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13 }}>
+            <option value="">全部方向</option>
+            {facets?.tech?.map((t: any) => (
+              <option key={t.value} value={t.value}>{TECH_CN[t.value] || t.value}（{t.count}）</option>
+            ))}
+          </select>
+
+          <input value={filter.q || ""} onChange={(e) => setFilter({ ...filter, q: e.target.value })}
+            placeholder="搜索题目名称"
+            style={{ padding: "6px 9px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13, width: 170 }} />
+
+          {hasFilter && <button className="btn ghost sm" onClick={() => setFilter({})}>清除</button>}
+
+          <span style={{ flex: 1 }} />
+          <label className="btn ghost sm" style={{ display: "inline-block" }}>
+            📄 上传赛题 PDF
+            <input type="file" accept="application/pdf" hidden onChange={onPdf} disabled={busy} />
+          </label>
+          {busy && <span className="spinner" />}
+        </div>
+
+        {!hasFilter ? (
+          <p className="hint" style={{ margin: "10px 0 0" }}>
+            题库共 {official.length} 道题。请用上方条件筛选，或直接搜索题目名称；
+            也可以跳过选题，把题面粘贴到下方对话框。
           </p>
-
-          {facets && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8, alignItems: "center" }}>
-              <select value={filter.contest || ""} onChange={(e) => setFilter({ ...filter, contest: e.target.value })}
-                style={{ padding: "5px 8px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13 }}>
-                <option value="">全部赛事</option>
-                {facets.contestTypes?.map((c: any) => (
-                  <option key={c.value} value={c.value}>{CONTEST_CN[c.value] || c.value}（{c.count}）</option>
-                ))}
-              </select>
-              <select value={filter.year || ""} onChange={(e) => setFilter({ ...filter, year: e.target.value })}
-                style={{ padding: "5px 8px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13 }}>
-                <option value="">全部年份</option>
-                {facets.years?.map((y: any) => <option key={y.value} value={y.value}>{y.value} 年（{y.count}）</option>)}
-              </select>
-              <select value={filter.tech || ""} onChange={(e) => setFilter({ ...filter, tech: e.target.value })}
-                style={{ padding: "5px 8px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13 }}>
-                <option value="">全部方向</option>
-                {facets.tech?.map((t: any) => (
-                  <option key={t.value} value={t.value}>{TECH_CN[t.value] || t.value}（{t.count}）</option>
-                ))}
-              </select>
-              <input value={filter.q || ""} onChange={(e) => setFilter({ ...filter, q: e.target.value })}
-                placeholder="搜索题目名称"
-                style={{ padding: "5px 8px", border: "1px solid var(--line)", borderRadius: 7, fontSize: 13, width: 150 }} />
-              {(filter.contest || filter.year || filter.tech || filter.q) && (
-                <button className="btn ghost sm" onClick={() => setFilter({})}>清除</button>
-              )}
-            </div>
-          )}
-
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {official.map((p) => (
+        ) : (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+            {shown.map((p: any) => (
               <button key={p.problem_id} className="btn ghost sm" disabled={busy}
                 title={`${CONTEST_CN[p.contest_type] || ""} · ${(p.tech_tags || []).map((t: string) => TECH_CN[t] || t).join("/")}`}
                 onClick={() => adoptOfficial(p.problem_id)}>
@@ -1097,37 +1109,16 @@ function ProblemPicker({ ctx }: { ctx: any }) {
                 {p.requirement_count > 0 && <span className="hint"> · {p.requirement_count} 条需求</span>}
               </button>
             ))}
-            {!official.length && <span className="hint">当前筛选条件下没有已发布的题目</span>}
+            {!official.length && <span className="hint">没有匹配的已发布题目</span>}
+            {official.length > SHOW_LIMIT && (
+              <span className="hint" style={{ alignSelf: "center" }}>
+                共 {official.length} 条，仅显示前 {SHOW_LIMIT} 条，请继续缩小范围
+              </span>
+            )}
           </div>
-        </div>
-      )}
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <select value={year} onChange={(e) => { setYear(e.target.value); setCode(""); }}
-          style={{ padding: 7, borderRadius: 8, border: "1px solid var(--line)" }}>
-          {PROBLEM_YEARS.map((y) => <option key={y} value={y}>{y} 年</option>)}
-        </select>
-        <select value={code} onChange={(e) => setCode(e.target.value)}
-          style={{ padding: 7, borderRadius: 8, border: "1px solid var(--line)", minWidth: 260 }}>
-          <option value="">— 选择题目 —</option>
-          {problems.map((p) => <option key={p.code} value={p.code}>{p.code} 题：{p.title}{p.group ? `（${p.group}）` : ""}</option>)}
-        </select>
-        <label className="btn ghost sm" style={{ display: "inline-block" }}>
-          📄 上传赛题 PDF
-          <input type="file" accept="application/pdf" hidden onChange={onPdf} disabled={busy} />
-        </label>
-        {busy && <span className="spinner" />}
+        )}
       </div>
-      {picked && (
-        <div className="issue info" style={{ marginTop: 10, display: "block" }}>
-          已选：<b>{year} 年 {picked.code} 题 · {picked.title}</b>
-          <p className="hint" style={{ margin: "4px 0 8px" }}>
-            题面正文受组委会版权保护，平台不内置。请上传该题 PDF，或把题面粘贴到下方对话框 —— 完整题面（含指标与评分表）能显著提升方案质量。
-          </p>
-          <button className="btn sm" onClick={() => ctx.runInterpret(
-            `${year} 年全国大学生电子设计竞赛 ${picked.code} 题：${picked.title}\n（题面正文未提供，请基于题名与常规赛题结构给出设计框架，并把所有缺失的量化指标标注为待补充）`
-          )}>仅按题名生成框架</button>
-        </div>
-      )}
+
       {msg && <p className="hint" style={{ marginTop: 8 }}>{msg}</p>}
       <p className="hint" style={{ marginTop: 8 }}>💡 电赛题目下发即为 PDF，直接上传最省事；也可直接把题面粘贴到下方对话框。</p>
     </div>
