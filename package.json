@@ -23,7 +23,8 @@
     "fetch-eetree": "tsx scripts/fetch-eetree.mts",
     "import-eetree": "tsx scripts/import-eetree.mts",
     "check-problems": "tsx scripts/check-problems.mts",
-    "dedupe-problems": "tsx scripts/dedupe-problems.mts"
+    "dedupe-problems": "tsx scripts/dedupe-problems.mts",
+    "fix-contest-type": "tsx scripts/fix-contest-type.mts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

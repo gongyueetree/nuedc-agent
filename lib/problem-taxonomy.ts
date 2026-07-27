@@ -4,6 +4,13 @@
 export const CONTEST_TYPES = ["national", "provincial", "invitational", "practice"] as const;
 export type ContestType = (typeof CONTEST_TYPES)[number];
 
+/** 按年份推断赛事类型。
+ *  全国大学生电子设计竞赛为两年一届，逢**奇数年**举办（2021/2023/2025）；
+ *  偶数年由各省自行组织省赛（含 TI 杯等冠名赛）。 */
+export function contestTypeByYear(year: number): ContestType {
+  return year % 2 === 1 ? "national" : "provincial";
+}
+
 export const CONTEST_LABEL: Record<ContestType, string> = {
   national: "全国大学生电子设计竞赛（国赛）",
   provincial: "省级赛区",

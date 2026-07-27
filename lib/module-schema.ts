@@ -80,12 +80,18 @@ export const moduleInputSchema = z.object({
   org_ref: z.string().nullish(),
   code_repositories: z.array(z.string()).default([]),
   datasheet_url: z.string().optional(),
+  // 采购信息。自制/实验室自研模块可以没有价格与链接，因此均为可选
+  purchase_url: z.string().optional(),
+  purchase_platform: z.string().optional(),   // 淘宝 / 立创 / 官网 / 自制…
 
   usage_notes: z.array(z.string()).default([]),     // 注意事项
   known_issues: z.array(z.string()).default([]),    // 常见 Bug
   compatibility: z.array(z.string()).default([]),   // 兼容/可替换模块 id
   competition_cases: z.array(z.object({             // 历届电赛应用
-    year: z.number(), problem: z.string(), note: z.string().optional(),
+    year: z.number(),
+    problem: z.string(),                            // 题目名称（自由文本，兼容历史数据）
+    problem_id: z.string().optional(),              // 关联题库中的题目，便于双向检索
+    note: z.string().optional(),
   })).default([]),
 
   evidence_records: z.array(evidenceRecordSchema).default([]),

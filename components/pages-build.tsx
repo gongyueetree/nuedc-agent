@@ -1025,7 +1025,14 @@ function ProblemPicker({ ctx }: { ctx: any }) {
     if (r?.ok) {
       setMsg(`已载入官方题目：${r.requirements} 条需求、${r.scoring_items} 个评分项（未消耗模型调用）`);
       ctx.reloadProject?.(pid);
-    } else setMsg(r?.error || "载入失败");
+    } else {
+      // 最常见的原因是题目尚未发布（工作人员还没提取需求并复核）
+      const e = String(r?.error || "");
+      setMsg(/未发布|尚未/.test(e)
+        ? `${e}。该题已在题库但还没完成解析与复核，暂时无法一键载入 —— ` +
+          `可以先把题面粘贴到下方对话框，或改选已发布的题目。`
+        : e || "载入失败，请重试或改用粘贴题面的方式。");
+    }
   }
 
   async function onPdf(e: React.ChangeEvent<HTMLInputElement>) {

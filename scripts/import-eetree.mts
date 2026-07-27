@@ -22,7 +22,7 @@
 import { readFileSync } from "node:fs";
 import { db, ensureSchema, closeDb } from "../lib/db";
 import { createProblem, createDraftVersion, saveExtraction } from "../lib/problem-center";
-import { suggestTechTags, TECH_LABEL, type TechCategory } from "../lib/problem-taxonomy";
+import { suggestTechTags, contestTypeByYear, TECH_LABEL, CONTEST_LABEL, type TechCategory } from "../lib/problem-taxonomy";
 
 interface EetreeRow {
   "年份": string;
@@ -217,7 +217,7 @@ async function main() {
     console.log("\n--- 样例（前 3 条）---");
     for (const m of mapped.slice(0, 3)) {
       console.log(`\n${m.year} ${m.code} · ${m.title}`);
-      console.log(`  场次：${m.stage || "（常规）"}　组别：${m.group || "（未标注）"}`);
+      console.log(`  赛事：${CONTEST_LABEL[contestTypeByYear(m.year)].split("（")[0]}　场次：${m.stage || "（常规）"}　组别：${m.group || "（未标注）"}`);
       console.log(`  方向：${m.tech.map((t) => TECH_LABEL[t]).join(" / ") || "（未识别）"}`);
       console.log(`  PDF：${m.pdfUrl || "无"}`);
       console.log(`  题面：${m.rawText.replace(/\n/g, " ").slice(0, 100)}…（${m.rawText.length} 字）`);
@@ -268,7 +268,8 @@ async function main() {
         // 有场次时题号带后缀（A-决赛、A-10月），避免同年同号冲突
         year: m.year, code: m.stage ? `${m.code}-${m.stage}` : m.code, title: m.title,
         groupName: m.group, createdBy: "eetree_import",
-        contestType: "national", techTags: m.tech,
+        // 奇数年国赛、偶数年省赛
+        contestType: contestTypeByYear(m.year), techTags: m.tech,
         sourceUrl: m.pdfUrl,
       });
       const versionId = await createDraftVersion(problemId, { rawText: m.rawText });

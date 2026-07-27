@@ -176,8 +176,22 @@ export function ModulesPage({ ctx }: { ctx: any }) {
                 </div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
-                <span className="price">¥{m.price}</span>
-                <span className="hint">{m.source_snapshot?.source === "taobao" ? "淘宝快照" : m.source_snapshot?.source === "lab" ? "实验室" : "官方"}</span>
+                {/* 自制/自研模块没有价格，显示来源即可，不要凑一个 ¥undefined */}
+                {m.price != null && m.price !== "" ? (
+                  <span className="price">¥{m.price}</span>
+                ) : (
+                  <span className="hint">自制 / 未标价</span>
+                )}
+                <span className="hint">
+                  {m.purchase_platform
+                    || (m.source_snapshot?.source === "taobao" ? "淘宝快照"
+                      : m.source_snapshot?.source === "lab" ? "实验室" : "官方")}
+                </span>
+                {m.purchase_url && (
+                  <a href={m.purchase_url} target="_blank" rel="noopener noreferrer"
+                    className="hint" style={{ textDecoration: "underline" }}
+                    onClick={(e) => e.stopPropagation()}>购买 ↗</a>
+                )}
                 <span style={{ flex: 1 }} />
                 <button className="btn ghost sm" onClick={() => setDetail(m)}>详情</button>
                 <button className={"btn sm" + (picked ? " ok" : "")}

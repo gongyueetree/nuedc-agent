@@ -185,6 +185,14 @@ function linkOnly(images: string[] | undefined): string[] {
 
 function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview, orgRole }: any) {
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
+  // 题库列表用于关联历届应用；失败不阻断编辑，退化为手工填写
+  const [problemOptions, setProblemOptions] = useState<any[]>([]);
+  useEffect(() => {
+    fetch("/api/problems?status=")
+      .then((r) => r.json())
+      .then((d) => setProblemOptions(d.problems || []))
+      .catch(() => setProblemOptions([]));
+  }, []);
 
   /** 上传图片：浏览器端压缩到合理尺寸后存为 data URL。
    *  这样图片随模块数据一起保存，不需要外部图床，也不会遇到淘宝那类站点的防盗链。 */
@@ -373,7 +381,10 @@ function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview, orgRole }:
               </F>
               <F label="逻辑电平 (V)"><input type="number" step="0.1" value={it.voltage_level ?? ""} onChange={(e) => updIface(i, { voltage_level: e.target.value === "" ? undefined : Number(e.target.value) })} /></F>
               <F label="最大速率 (bps)"><input type="number" value={it.max_baudrate ?? ""} onChange={(e) => updIface(i, { max_baudrate: e.target.value === "" ? undefined : Number(e.target.value) })} /></F>
-              <F label="I2C 地址"><input value={it.address ?? ""} onChange={(e) => updIface(i, { address: e.target.value || undefined })} placeholder="0x76" /></F>
+              {/* 地址只对 I2C 有意义；其它协议显示会误导录入 */}
+              {String(it.interface_type || "").toUpperCase() === "I2C" ? (
+                <F label="I2C 地址"><input value={it.address ?? ""} onChange={(e) => updIface(i, { address: e.target.value || undefined })} placeholder="0x76" /></F>
+              ) : <div />}
             </div>
             <label className="ck"><input type="checkbox" checked={!!it.five_v_tolerant} onChange={(e) => updIface(i, { five_v_tolerant: e.target.checked })} />5V 容忍</label>
             <F label="引脚（每行 信号=物理脚，如 SDA=PB7）">
@@ -411,12 +422,55 @@ function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview, orgRole }:
       </section>
 
       <section>
+        <h4>采购信息 <span className="hint" style={{ fontWeight: 400 }}>自制/实验室自研模块可留空</span></h4>
+        <div className="ef-grid">
+          <F label="价格（¥）">
+            <input type="number" value={draft.price ?? ""} placeholder="自制模块可不填"
+              onChange={(e) => set("price", e.target.value === "" ? undefined : Number(e.target.value))} />
+          </F>
+          <F label="购买平台">
+            <input value={draft.purchase_platform || ""} placeholder="淘宝 / 立创商城 / 官网 / 自制"
+              onChange={(e) => set("purchase_platform", e.target.value || undefined)} />
+          </F>
+        </div>
+        <F label="购买链接">
+          <input value={draft.purchase_url || ""} placeholder="https://…（自制模块留空）"
+            onChange={(e) => set("purchase_url", e.target.value || undefined)} />
+        </F>
+        {draft.purchase_url && !/^https?:\/\//.test(draft.purchase_url) && (
+          <p className="hint" style={{ color: "var(--red)", margin: "4px 0 0" }}>链接需以 http:// 或 https:// 开头</p>
+        )}
+      </section>
+
+      <section>
         <h4>历届电赛应用 <button className="btn ghost sm" onClick={addCase}>＋ 添加</button></h4>
+        <p className="hint" style={{ margin: "0 0 8px" }}>
+          从题库选择该模块曾用于哪些赛题；选定后自动带出年份与题目名称，也可手工填写。
+        </p>
         {(draft.competition_cases || []).map((c: any, i: number) => (
-          <div key={i} className="ef-grid" style={{ alignItems: "end", marginBottom: 6 }}>
-            <F label="年份"><input type="number" value={c.year} onChange={(e) => updCase(i, { year: Number(e.target.value) })} /></F>
-            <F label="题目"><input value={c.problem} onChange={(e) => updCase(i, { problem: e.target.value })} placeholder="A题" /></F>
-            <F label="备注"><input value={c.note || ""} onChange={(e) => updCase(i, { note: e.target.value })} /></F>
+          <div key={i} style={{ display: "grid", gridTemplateColumns: "1.6fr 0.5fr 1fr auto",
+            gap: 8, alignItems: "end", marginBottom: 6 }}>
+            <F label="赛题">
+              <select value={c.problem_id || ""}
+                onChange={(e) => {
+                  const p = problemOptions.find((x: any) => x.problem_id === e.target.value);
+                  updCase(i, p
+                    ? { problem_id: p.problem_id, year: Number(p.year), problem: `${p.code}题 ${p.title}` }
+                    : { problem_id: undefined });
+                }}>
+                <option value="">— 手工填写 —</option>
+                {problemOptions.map((p: any) => (
+                  <option key={p.problem_id} value={p.problem_id}>
+                    {p.year} {p.code} · {p.title}
+                  </option>
+                ))}
+              </select>
+            </F>
+            <F label="年份"><input type="number" value={c.year}
+              onChange={(e) => updCase(i, { year: Number(e.target.value) })} /></F>
+            <F label={c.problem_id ? "题目（来自题库）" : "题目"}>
+              <input value={c.problem} disabled={!!c.problem_id}
+                onChange={(e) => updCase(i, { problem: e.target.value })} placeholder="如：A题 单相逆变器" /></F>
             <button className="btn ghost sm danger" onClick={() => delCase(i)}>删</button>
           </div>
         ))}

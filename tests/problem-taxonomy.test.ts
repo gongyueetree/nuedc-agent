@@ -332,3 +332,68 @@ describe("题库去重工具", () => {
     expect(src).toContain("干跑模式，未删除任何内容");
   });
 });
+
+describe("赛事类型按年份判定", () => {
+  it("奇数年国赛、偶数年省赛", async () => {
+    const { contestTypeByYear } = await import("../lib/problem-taxonomy");
+    for (const y of [2019, 2021, 2023, 2025]) expect(contestTypeByYear(y)).toBe("national");
+    for (const y of [2020, 2022, 2024, 2026]) expect(contestTypeByYear(y)).toBe("provincial");
+  });
+
+  it("导入时按年份自动判定，不再一律标国赛", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/import-eetree.mts", "utf8");
+    expect(src).toContain("contestTypeByYear(m.year)");
+    expect(src).not.toContain('contestType: "national", techTags');
+  });
+
+  it("修正脚本只动 official_problems，不碰模块表", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/fix-contest-type.mts", "utf8");
+    expect(src).toContain("不触碰 modules 表");
+    expect(src).toContain("UPDATE official_problems SET contest_type");
+    expect(src).not.toMatch(/UPDATE modules|DELETE FROM modules/);
+    expect(src).toContain('APPLY = process.argv.includes("--apply")');
+  });
+});
+
+describe("模块采购与赛题关联", () => {
+  it("购买链接与平台为可选（自制模块可留空）", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/module-schema.ts", "utf8");
+    expect(src).toContain("purchase_url: z.string().optional()");
+    expect(src).toContain("purchase_platform: z.string().optional()");
+    expect(src).toContain("自制/实验室自研模块可以没有价格与链接");
+  });
+
+  it("历届应用可关联题库中的题目", async () => {
+    const fs = await import("node:fs");
+    const schema = fs.readFileSync("lib/module-schema.ts", "utf8");
+    expect(schema).toContain("problem_id: z.string().optional()");
+    const ui = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    expect(ui).toContain("problemOptions");
+    expect(ui).toContain("— 手工填写 —");   // 兼容不在题库里的历史数据
+  });
+
+  it("模块卡片无价格时不显示 ¥undefined", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-core.tsx", "utf8");
+    expect(src).toContain('m.price != null && m.price !== ""');
+    expect(src).toContain("自制 / 未标价");
+    expect(src).toContain("购买 ↗");
+  });
+
+  it("I2C 地址只在协议为 I2C 时显示", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    expect(src).toContain('String(it.interface_type || "").toUpperCase() === "I2C"');
+    expect(src).toContain("地址只对 I2C 有意义");
+  });
+
+  it("采用未发布题目时给出可操作提示", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-build.tsx", "utf8");
+    expect(src).toContain("还没完成解析与复核");
+    expect(src).toContain("可以先把题面粘贴到下方对话框");
+  });
+});
