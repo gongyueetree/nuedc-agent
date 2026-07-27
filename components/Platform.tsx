@@ -18,23 +18,24 @@ export const STAGE_LABEL: Record<string, string> = {
 const NAV = [
   { key: "home",     label: "首页",     icon: "🏠" },
   { key: "solution", label: "方案生成", icon: "🧠" },
-  { key: "modules",  label: "模块选型", icon: "🔲" },
   { key: "wiring",   label: "电路连线", icon: "🔌" },
   { key: "bom",      label: "物料清单", icon: "📦" },
   { key: "code",     label: "代码生成", icon: "⌨️" },
   { key: "debug",    label: "调试助手", icon: "🔬" },
   { key: "testing",  label: "测试评分", icon: "🧪" },
   { key: "report",   label: "报告生成", icon: "📄" },
-  // 「我的项目」不属于备赛流程，入口放在右上角，不占流程步骤
+  // 以下两项不属于备赛流程，入口放在顶栏：
+  // 电赛模块是可随时查阅的资料库，我的项目是项目管理
+  { key: "modules",  label: "电赛模块", icon: "🔲" },
   { key: "projects", label: "我的项目", icon: "📁" },
 ] as const;
 
 /** 参与流程导航的页面（左侧栏与工作流标签）。
  *  projects 是项目管理入口而非流程步骤，放在顶栏。 */
-const FLOW_NAV = NAV.filter((n) => n.key !== "projects");
+const FLOW_NAV = NAV.filter((n) => !["projects", "modules"].includes(n.key));
 export type PageKey = (typeof NAV)[number]["key"];
 const PAGE_TITLE: Record<PageKey, string> = {
-  home: "首页", solution: "方案生成", modules: "模块选型",
+  home: "首页", solution: "方案生成", modules: "电赛模块",
   wiring: "电路连线与接口检查", bom: "物料清单（BOM 工作台）", code: "代码生成",
   debug: "调试助手（LabSight）", testing: "测试与评分",
   report: "报告生成", projects: "我的项目",
@@ -74,7 +75,7 @@ export default function Platform({ embed }: { embed: boolean }) {
   const [staleTypes, setStaleTypes] = useState<string[]>([]);        // 方案变更后过期的产物类型
   const [sysMode, setSysMode] = useState<any>(null);                 // 系统模式与排队情况
   const [progress, setProgress] = useState<any>(null);               // 当前任务排队位置
-  const [shortlist, setShortlist] = useState<string[]>([]); // 模块选型页「选用」的备选模块
+  const [shortlist, setShortlist] = useState<string[]>([]); // 电赛模块页「选用」的备选模块
 
   const say = useCallback((who: Msg["who"], text: string) => {
     setMsgs((m) => [...m, { who, text }]);
@@ -575,6 +576,8 @@ export default function Platform({ embed }: { embed: boolean }) {
             {projects.map((p) => <option key={p.project_id} value={p.project_id}>{p.name}</option>)}
           </select>
           <span className="stagepill">{STAGE_LABEL[stage] || stage}</span>
+          <button className={"btn ghost sm" + (page === "modules" ? " on" : "")}
+            onClick={() => setPage("modules")} title="浏览电赛模块库，可随时选用到当前方案">🔲 电赛模块</button>
           <button className={"btn ghost sm" + (page === "projects" ? " on" : "")}
             onClick={() => setPage("projects")} title="查看与管理全部项目">📁 我的项目</button>
           <button className="btn ghost sm" onClick={resetProject}>新建项目</button>

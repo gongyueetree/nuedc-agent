@@ -420,3 +420,28 @@ describe("导航与字段归属（防回归）", () => {
     expect(src).toContain("!detail.assets_locked");
   });
 });
+
+describe("电赛模块移出流程导航", () => {
+  it("modules 与 projects 都不在流程导航中", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/Platform.tsx", "utf8");
+    expect(src).toContain('FLOW_NAV = NAV.filter((n) => !["projects", "modules"].includes(n.key))');
+    expect(src).toContain('label: "电赛模块"');
+    expect(src).not.toContain('label: "模块选型"');
+  });
+
+  it("顶栏提供电赛模块入口", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/Platform.tsx", "utf8");
+    expect(src).toContain('onClick={() => setPage("modules")}');
+    expect(src).toContain("可随时选用到当前方案");
+  });
+
+  it("面向用户的文案统一改名", async () => {
+    const fs = await import("node:fs");
+    for (const f of ["components/pages-build.tsx", "components/pages-core.tsx"]) {
+      const src = fs.readFileSync(f, "utf8");
+      expect(src, `${f} 仍有旧称呼`).not.toContain("「模块选型」");
+    }
+  });
+});

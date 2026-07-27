@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 const FIX_HINTS: Record<string, string> = {
   POWER_BUDGET_EXCEEDED: "① 在下方电源树把该轨预算改大（同时换用更大电流的 DC-DC/LDO）；② 或把大电流模块（视觉、电机）挪到独立电源轨；③ 或在方案页替换为更省电的模块。",
   POWER_BUDGET_TIGHT: "建议留 20~30% 裕量：把该轨预算调大，或确认电源芯片实际输出能力。",
-  POWER_DATA_MISSING: "到「模块选型」打开该模块补录典型/峰值电流（功率类器件建议实测）。缺数据时预算无法核算。",
+  POWER_DATA_MISSING: "到「电赛模块」打开该模块补录典型/峰值电流（功率类器件建议实测）。缺数据时预算无法核算。",
   LEVEL_5V_INTO_3V3: "加电平转换芯片（如 TXS0108E）或分压电阻；也可在方案页替换为 5V 容忍的模块。",
   LEVEL_MISMATCH: "确认接收端是否 5V 容忍；不确定就加电平转换或分压。",
   LEVEL_LOW_DRIVE_HIGH: "核对接收端 VIH 阈值；不满足时加比较器/运放缓冲，或换电平匹配的模块。",
@@ -230,7 +230,7 @@ export function SolutionPage({ ctx }: { ctx: any }) {
       {!ctx.requirements && <ProblemPicker ctx={ctx} />}
       {ctx.shortlist?.length > 0 && (
         <div className="issue info" style={{ display: "block", marginBottom: 10 }}>
-          🔧 已从「模块选型」选用 {ctx.shortlist.length} 个模块，生成方案时会优先考虑：
+          🔧 已从「电赛模块」选用 {ctx.shortlist.length} 个模块，生成方案时会优先考虑：
           {ctx.modules.filter((m: any) => ctx.shortlist.includes(m.id)).map((m: any) => m.name).join("、")}
           <button className="btn ghost sm" style={{ marginLeft: 8 }} onClick={() => ctx.setShortlist([])}>清空</button>
         </div>
@@ -319,7 +319,7 @@ export function SolutionPage({ ctx }: { ctx: any }) {
                 2️⃣ 确认后点「生成方案」，得到一套完整方案（含框图与接口预检）。<br />
                 3️⃣ 核对后点「采用为主方案」，即可继续 BOM、连线检查、代码与报告。<br />
                 　　需要写报告的「方案论证」章节时，可再生成稳妥/性能取向的备选方案做对比。<br /><br />
-                💡 想让方案优先使用某些手头模块？先去「模块选型」页点「选用」。</p>
+                💡 想让方案优先使用某些手头模块？先去顶栏「电赛模块」点「选用」。</p>
             </div>
           )}
         </div>
@@ -409,7 +409,7 @@ export function WiringPage({ ctx }: { ctx: any }) {
                 ))}
               </tbody>
             </table>
-            <p className="hint" style={{ marginTop: 6 }}>改完失去焦点即自动重跑规则检查。模块实际功耗未知时，请到「模块选型」补录典型/峰值电流。</p>
+            <p className="hint" style={{ marginTop: 6 }}>改完失去焦点即自动重跑规则检查。模块实际功耗未知时，请到「电赛模块」补录典型/峰值电流。</p>
           </div>
         )}
       </div>

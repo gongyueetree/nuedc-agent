@@ -538,7 +538,7 @@ function Categories({ mods }: { mods: any[] }) {
     <div className="page">
       <div className="card" style={{ marginBottom: 14 }}>
         <h3>分类体系</h3>
-        <p className="hint">采用「大类 / 子类」两级分层，编码为 <code>大类.子类</code>（如 <code>actuator.motor_driver</code>）。模块选型页的筛选、编辑表单的下拉、方案框图的角色识别都读这份分类。要新增分类，编辑 <code>data/categories.ts</code> 的 <code>CATEGORY_TREE</code> 即可（改动后所有下拉自动更新）。</p>
+        <p className="hint">采用「大类 / 子类」两级分层，编码为 <code>大类.子类</code>（如 <code>actuator.motor_driver</code>）。电赛模块页的筛选、编辑表单的下拉、方案框图的角色识别都读这份分类。要新增分类，编辑 <code>data/categories.ts</code> 的 <code>CATEGORY_TREE</code> 即可（改动后所有下拉自动更新）。</p>
       </div>
       <div className="grid cols-3">
         {CATEGORY_TREE.map((g) => (
