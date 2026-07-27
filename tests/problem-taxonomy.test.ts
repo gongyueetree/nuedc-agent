@@ -207,3 +207,58 @@ describe("题目详情与删除", () => {
     expect(fn).toContain("force=1");
   });
 });
+
+describe("删除语句与实际表结构一致", () => {
+  it("每条 DELETE 引用的列都存在于对应表", async () => {
+    const { MIGRATIONS } = await import("../lib/migrations");
+    const fs = await import("node:fs");
+    const all = (MIGRATIONS as any[]).map((m) => m.sql).join("\n");
+    const src = fs.readFileSync("lib/problem-center.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function deleteProblem"));
+
+    const stmts = fn.match(/DELETE FROM (\w+) WHERE (\w+)=\?/g) || [];
+    expect(stmts.length).toBeGreaterThanOrEqual(6);
+    for (const st of stmts) {
+      const m = st.match(/DELETE FROM (\w+) WHERE (\w+)=/)!;
+      const [, table, col] = m;
+      const tbl = all.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${table}[^;]*`, "i"));
+      expect(tbl, `未找到表 ${table}`).toBeTruthy();
+      expect(new RegExp(`\\b${col}\\b`).test(tbl![0]), `${table} 没有列 ${col}`).toBe(true);
+    }
+  });
+
+  it("RETURNING 使用真实存在的主键列（req_id 而非 id）", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/problem-center.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function deleteProblem"));
+    expect(fn).toContain("RETURNING req_id");
+    expect(fn).not.toMatch(/problem_requirements[^;]*RETURNING id\b/);
+  });
+
+  it("差异表按 problem_id 清理，不是 version_id", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/problem-center.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function deleteProblem"));
+    expect(fn).toContain("DELETE FROM problem_review_diffs WHERE problem_id=?");
+  });
+});
+
+describe("未提取时的详情页可用性", () => {
+  it("没有结构化需求时显示题面原文与下一步指引", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    expect(src).toContain("尚未提取结构化需求");
+    expect(src).toContain("查看题面原文");
+    // 页面原本一片空白，既看不到题面也不知道该做什么
+    expect(src).toContain("!sel.requirements?.length &&");
+  });
+
+  it("提取优先复用已入库题面，不必手工再粘一遍", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    const fn = src.slice(src.indexOf("async function extractFromText"), src.indexOf("async function resolveDiff"));
+    expect(fn).toContain("sel.raw_text");
+    expect(fn).toContain("使用已入库的题面原文执行提取");
+    expect(src).toContain("用已入库题面提取");
+  });
+});

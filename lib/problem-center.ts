@@ -606,13 +606,15 @@ export async function deleteProblem(problemId: string, opts: { force?: boolean }
 
     let reqCount = 0;
     for (const vid of versionIds) {
-      const rq = await tx.execute({ sql: "DELETE FROM problem_requirements WHERE version_id=? RETURNING id", args: [vid] });
+      // 各表主键列名不同，RETURNING 必须用实际存在的列
+      const rq = await tx.execute({ sql: "DELETE FROM problem_requirements WHERE version_id=? RETURNING req_id", args: [vid] });
       reqCount += rq.rows.length;
       await tx.execute({ sql: "DELETE FROM problem_scoring_items WHERE version_id=?", args: [vid] });
       await tx.execute({ sql: "DELETE FROM problem_notes WHERE version_id=?", args: [vid] });
       await tx.execute({ sql: "DELETE FROM problem_reviews WHERE version_id=?", args: [vid] });
-      await tx.execute({ sql: "DELETE FROM problem_review_diffs WHERE version_id=?", args: [vid] });
     }
+    // 差异表按 problem_id 关联，不是 version_id
+    await tx.execute({ sql: "DELETE FROM problem_review_diffs WHERE problem_id=?", args: [problemId] });
     await tx.execute({ sql: "DELETE FROM problem_versions WHERE problem_id=?", args: [problemId] });
     await tx.execute({ sql: "DELETE FROM official_problems WHERE problem_id=?", args: [problemId] });
 

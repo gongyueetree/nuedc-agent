@@ -125,7 +125,15 @@ export default function ProblemCenterClient() {
 
   async function extractFromText() {
     if (!sel) return;
-    const text = prompt("粘贴赛题原文（也可直接上传 PDF）：");
+    // 导入的题目题面已在库里，无需再让用户粘一遍
+    let text = sel.raw_text || "";
+    if (text) {
+      if (!confirm(`使用已入库的题面原文执行提取（${text.length} 字）？\n\n取消则改为手工粘贴。`)) {
+        text = prompt("粘贴赛题原文：") || "";
+      }
+    } else {
+      text = prompt("粘贴赛题原文（也可直接上传 PDF）：") || "";
+    }
     if (!text) return;
     setBusy("正在提取并复核…");
     const r = await fetch(`/api/problems/${sel.problem_id}/extract`, {
@@ -188,7 +196,8 @@ export default function ProblemCenterClient() {
                     📄 上传赛题 PDF（双模复核）
                     <input type="file" accept="application/pdf" hidden onChange={uploadPdf} disabled={!!busy} />
                   </label>
-                  <button className="btn ghost sm" onClick={extractFromText} disabled={!!busy}>粘贴文本提取</button>
+                  <button className="btn ghost sm" onClick={extractFromText} disabled={!!busy}>
+                    {sel.raw_text ? "用已入库题面提取" : "粘贴文本提取"}</button>
                   <button className="btn sm" onClick={publish}
                     disabled={sel.status === "published" || critical > 0 || !sel.requirements?.length}>
                     {sel.status === "published" ? "已发布" : "发布标准题目"}
@@ -220,6 +229,35 @@ export default function ProblemCenterClient() {
                       ) : <span className="chip green">✓ {d.resolution}</span>}
                     </div>
                   ))}
+                </div>
+              )}
+
+              {/* 已导入题面但还没提取结构化需求时，页面原本一片空白，
+                  既看不到题面也不知道下一步该做什么 */}
+              {!sel.requirements?.length && (
+                <div className="card">
+                  <h3>尚未提取结构化需求</h3>
+                  {sel.raw_text ? (
+                    <>
+                      <p className="hint" style={{ margin: "4px 0 10px" }}>
+                        题面原文已入库（{String(sel.raw_text).length} 字）。
+                        点上方「粘贴文本提取」可直接对这段原文执行双模复核；
+                        若有官方 PDF，用「上传赛题 PDF」提取更准确（含完整评分表）。
+                      </p>
+                      <details>
+                        <summary className="hint" style={{ cursor: "pointer" }}>查看题面原文</summary>
+                        <pre style={{
+                          whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.7,
+                          maxHeight: 420, overflow: "auto", marginTop: 8,
+                          padding: 10, background: "var(--bg2, #f7f8fa)", borderRadius: 8,
+                        }}>{sel.raw_text}</pre>
+                      </details>
+                    </>
+                  ) : (
+                    <p className="hint">
+                      该版本没有题面原文。请用「上传赛题 PDF」或「粘贴文本提取」录入题面。
+                    </p>
+                  )}
                 </div>
               )}
 
