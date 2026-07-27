@@ -10,7 +10,7 @@ async function main() {
     sql: `SELECT v.version_id, p.year, p.code, p.title, v.raw_text
           FROM problem_versions v JOIN official_problems p ON p.problem_id = v.problem_id
           WHERE EXISTS (SELECT 1 FROM problem_requirements r WHERE r.version_id = v.version_id)
-          ORDER BY v.updated_at DESC NULLS LAST LIMIT ?`,
+          ORDER BY v.created_at DESC LIMIT ?`,
     args: [N],
   });
 

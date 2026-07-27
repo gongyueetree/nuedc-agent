@@ -44,6 +44,8 @@ const EXTRACT_SYSTEM = `你从电子设计竞赛赛题原文中提取结构化�
 1. 只提取原文明确写出的内容。原文没写的指标、数值、条件一律不填
 2. 数值必须连同单位与测试条件一起提取，条件缺失时在 note 里说明
 3. 分不清是基本要求还是发挥部分时，标 uncertain 而不是猜
+4. source_quote 必须是题面里真实存在的原句片段，不得改写或概括 ——
+   审核人要靠它逐条比对，写错比留空更糟
 
 【输出 JSON】
 {
@@ -51,6 +53,7 @@ const EXTRACT_SYSTEM = `你从电子设计竞赛赛题原文中提取结构化�
     { "requirement_no": "1.1", "type": "basic|advanced|uncertain",
       "description": "原文表述", "target": 数值或null, "unit": "单位或null",
       "tolerance": "误差要求或null", "verification_method": "measurement|inspection|demo|null",
+      "source_quote": "该条需求对应的题面原句（必填，用于人工核对与发布审查）",
       "note": "补充说明或null" }
   ],
   "scoring_items": [
@@ -122,6 +125,15 @@ async function extractOne(t: Target): Promise<{
   // 题面本身没有评分表时，评分项为空是数据源的限制而非提取失败 ——
   // eetree 导出的评审标准填充率仅 3%，完整评分表在官方 PDF 里
   const hasScoringText = /评分|分值|满分|\d+\s*分/.test(raw);
+
+  // 兜底：模型偶尔漏给 source_quote，用描述在原文中反查一段上下文。
+  // 找不到就留空 —— 宁可让发布清单拦下，也不编一段引用。
+  for (const r of reqs) {
+    if (r.source_quote && String(r.source_quote).trim()) continue;
+    const key = String(r.description || "").slice(0, 12);
+    const at = key.length >= 6 ? raw.indexOf(key) : -1;
+    if (at >= 0) r.source_quote = raw.slice(Math.max(0, at - 20), at + 120).trim();
+  }
 
   await saveExtraction(t.version_id, {
     rawText: raw,

@@ -145,6 +145,39 @@ export default function ProblemCenterClient() {
     else setMsg(r?.error || "提取失败");
   }
 
+  async function confirmAll() {
+    if (!sel) return;
+    const n = (sel.requirements || []).filter((r: any) => !["CONFIRMED", "REJECTED"].includes(r.status)).length;
+    if (!n) { setMsg("所有需求都已确认或驳回"); return; }
+    if (!confirm(`将 ${n} 条待确认需求一次性标记为已确认？\n\n` +
+      `请先核对数值单位与基本/发挥分类 —— 确认后这些内容会随发布提供给用户。`)) return;
+    setBusy("确认中…");
+    await fetch(`/api/problems/${sel.problem_id}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version_id: sel.version_id, action: "confirm_all" }),
+    });
+    setBusy("");
+    setMsg(`已确认 ${n} 条需求`);
+    openProblem(sel.problem_id);
+  }
+
+  async function resolveAllNotes() {
+    if (!sel) return;
+    const pending = (sel.notes || []).filter((n: any) => n.kind === "ambiguity" && n.resolved !== 1);
+    if (!pending.length) { setMsg("没有待处理的题面歧义"); return; }
+    if (!confirm(`将 ${pending.length} 条题面歧义标记为已处理？`)) return;
+    setBusy("处理中…");
+    for (const n of pending) {
+      await fetch(`/api/problems/${sel.problem_id}`, {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version_id: sel.version_id, action: "resolve_note", note_id: n.note_id }),
+      });
+    }
+    setBusy("");
+    setMsg(`已处理 ${pending.length} 条歧义`);
+    openProblem(sel.problem_id);
+  }
+
   async function resolveDiff(id: number, resolution: string) {
     await fetch(`/api/problems/${sel.problem_id}/diffs`, {
       method: "PATCH", headers: { "content-type": "application/json" },
@@ -153,10 +186,28 @@ export default function ProblemCenterClient() {
     openProblem(sel.problem_id);
   }
 
-  async function publish() {
-    const r = await fetch(`/api/problems/${sel.problem_id}/publish`, { method: "POST" }).then((x) => x.json());
-    if (r.ok) { setMsg("已发布！用户现在可以直接选用该题目（零模型调用）"); load(); openProblem(sel.problem_id); }
-    else setMsg(r.error);
+  async function publish(override = false) {
+    setBusy(override ? "强制发布中…" : "发布中…");
+    const r = await fetch(`/api/problems/${sel.problem_id}/publish`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version_id: sel.version_id, override }),
+    }).then((x) => x.json()).catch(() => null);
+    setBusy("");
+    if (r?.ok) {
+      setMsg(override
+        ? "已强制发布（发布记录标注 override，可在版本历史中追溯）"
+        : "已发布！用户现在可以直接选用该题目（零模型调用）");
+      load(); openProblem(sel.problem_id);
+    } else setMsg(r?.error || "发布失败");
+  }
+
+  async function publishWithOverride() {
+    const unmet = (sel?.checklist || []).filter((c: any) => !c.ok).map((c: any) => c.label);
+    if (!confirm(
+      `以下清单项未通过：\n${unmet.map((x: string) => "· " + x).join("\n")}\n\n` +
+      `强制发布后学生将直接使用这份内容。发布记录会标注 override 以便追溯。\n确定继续？`
+    )) return;
+    publish(true);
   }
 
   if (!authed) {
@@ -198,13 +249,48 @@ export default function ProblemCenterClient() {
                   </label>
                   <button className="btn ghost sm" onClick={extractFromText} disabled={!!busy}>
                     {sel.raw_text ? "用已入库题面提取" : "粘贴文本提取"}</button>
-                  <button className="btn sm" onClick={publish}
+                  <button className="btn sm" onClick={() => publish(false)}
                     disabled={sel.status === "published" || critical > 0 || !sel.requirements?.length}>
                     {sel.status === "published" ? "已发布" : "发布标准题目"}
                   </button>
                 </div>
                 {busy && <p className="hint" style={{ marginTop: 8 }}><span className="spinner" /> {busy}</p>}
                 {critical > 0 && <div className="issue blocker" style={{ marginTop: 8 }}>还有 {critical} 处关键差异（指标/分值）未确认，不能发布</div>}
+
+                {/* 发布清单逐项显示，让人知道差什么、怎么补，而不是只报一句「未通过」 */}
+                {sel.checklist && sel.status !== "published" && (
+                  <div style={{ marginTop: 10 }}>
+                    <p className="hint" style={{ margin: "0 0 6px" }}>发布清单</p>
+                    {sel.checklist.map((c: any) => (
+                      <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 13 }}>
+                        <span style={{ color: c.ok ? "var(--green, #16a34a)" : "var(--red, #dc2626)" }}>
+                          {c.ok ? "✓" : "✗"}
+                        </span>
+                        <span style={{ flex: 1, color: c.ok ? "var(--muted)" : "inherit" }}>{c.label}</span>
+                        {!c.ok && c.key === "requirements_confirmed" && (
+                          <button className="btn ghost sm" onClick={confirmAll} disabled={!!busy}>全部确认</button>
+                        )}
+                        {!c.ok && c.key === "ambiguities_resolved" && (
+                          <button className="btn ghost sm" onClick={resolveAllNotes} disabled={!!busy}>全部处理</button>
+                        )}
+                        {!c.ok && c.key === "has_source_refs" && (
+                          <span className="hint">需重新提取（新版会带原文引用）</span>
+                        )}
+                        {!c.ok && c.key === "reviewer_count" && (
+                          <span className="hint">需两名工作人员分别审核</span>
+                        )}
+                      </div>
+                    ))}
+                    {sel.checklist.some((c: any) => !c.ok) && (
+                      <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                        <button className="btn ghost sm danger" onClick={publishWithOverride} disabled={!!busy}>
+                          强制发布（跳过未通过项）
+                        </button>
+                        <span className="hint">仅在确认内容无误时使用；发布记录会标注 override</span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {diffs.length > 0 && (

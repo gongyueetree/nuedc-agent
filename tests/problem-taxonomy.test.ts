@@ -499,3 +499,83 @@ describe("提取保存的健壮性", () => {
     expect(src).toContain("有无编造");
   });
 });
+
+describe("脚本 SQL 与表结构一致", () => {
+  it("SQL 语句中引用的列都存在于迁移定义中", async () => {
+    const { MIGRATIONS } = await import("../lib/migrations");
+    const fs = await import("node:fs");
+    const allSql = (MIGRATIONS as any[]).map((m) => m.sql).join("\n");
+
+    const tableCols = new Map<string, Set<string>>();
+    for (const m of allSql.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?)\n\)/g)) {
+      const cols = new Set<string>();
+      for (const line of m[2].split("\n")) {
+        const c = line.trim().match(/^(\w+)\s+(TEXT|INTEGER|BIGSERIAL|NUMERIC|TIMESTAMPTZ|BOOLEAN|DATE|SERIAL)/i);
+        if (c) cols.add(c[1]);
+      }
+      tableCols.set(m[1], cols);
+    }
+    for (const m of allSql.matchAll(/ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)/g)) {
+      if (!tableCols.has(m[1])) tableCols.set(m[1], new Set());
+      tableCols.get(m[1])!.add(m[2]);
+    }
+
+    const problems: string[] = [];
+    const files = [...fs.readdirSync("scripts").filter((f) => f.endsWith(".mts")).map((f) => `scripts/${f}`),
+      "lib/problem-center.ts", "lib/task-queue.ts"];
+
+    for (const file of files) {
+      const src = fs.readFileSync(file, "utf8");
+      // 只在 SQL 字符串内部检查，避免把 TS 对象属性（r.ok / r.items）误判为列
+      for (const sqlBlock of src.matchAll(/`([^`]*(?:SELECT|UPDATE|DELETE|INSERT)[^`]*)`/gi)) {
+        const sql = sqlBlock[1];
+        for (const m of sql.matchAll(/FROM (\w+) (\w+)\b/g)) {
+          const [, table, alias] = m;
+          const cols = tableCols.get(table);
+          if (!cols || !cols.size) continue;
+          for (const u of sql.matchAll(new RegExp(`\\b${alias}\\.(\\w+)`, "g"))) {
+            if (!cols.has(u[1])) problems.push(`${file}: ${table} 无列 ${u[1]}`);
+          }
+        }
+      }
+    }
+    expect([...new Set(problems)], problems.slice(0, 4).join(" | ")).toHaveLength(0);
+  });
+});
+
+describe("发布清单的可操作性", () => {
+  it("提取时要求模型输出原文引用（发布清单要求可溯源）", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/batch-extract.mts", "utf8");
+    expect(src).toContain("source_quote");
+    expect(src).toContain("必须是题面里真实存在的原句片段");
+    // 兜底反查，但找不到时留空而非编造
+    expect(src).toContain("宁可让发布清单拦下，也不编一段引用");
+  });
+
+  it("发布清单逐项显示，未通过项给出补救入口", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    expect(src).toContain("发布清单");
+    expect(src).toContain("confirmAll");
+    expect(src).toContain("resolveAllNotes");
+    expect(src).toContain("需两名工作人员分别审核");
+  });
+
+  it("强制发布需确认且记录标注 override", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    expect(src).toContain("publishWithOverride");
+    expect(src).toContain("强制发布后学生将直接使用这份内容");
+    expect(src).toContain("发布记录会标注 override");
+    const lib = fs.readFileSync("lib/problem-center.ts", "utf8");
+    expect(lib).toContain('publishedBy + (override ? " (override)" : "")');
+  });
+
+  it("批量确认前提示核对要点，不是无脑放行", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    const fn = src.slice(src.indexOf("async function confirmAll"), src.indexOf("async function resolveAllNotes"));
+    expect(fn).toContain("请先核对数值单位与基本/发挥分类");
+  });
+});
