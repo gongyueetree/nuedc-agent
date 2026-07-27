@@ -286,7 +286,6 @@ function Editor({ draft, setDraft, isNew, onSave, onCancel, onReview, orgRole }:
             </select>
           </F>
           <F label="主芯片"><input value={draft.main_chip || ""} onChange={(e) => set("main_chip", e.target.value)} placeholder="BMP280" /></F>
-          <F label="价格 (¥)"><input type="number" value={draft.price ?? 0} onChange={(e) => set("price", Number(e.target.value))} /></F>
           <F label="版本"><input value={draft.version || "1.0.0"} onChange={(e) => set("version", e.target.value)} /></F>
           <F label="认证状态（只读，通过下方审核动作变更）">
             <input value={draft.certification_status} disabled />

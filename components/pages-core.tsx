@@ -256,9 +256,42 @@ export function ModuleDetailModal({ detail, onClose, onPick, picked }: { detail:
                 <td className="hint">{e.conditions || "—"}</td></tr>))}
             </tbody></table></>
         )}
-        {detail.assets_locked
-          ? <div className="issue info">🔒 原理图 / PCB / 代码仓库为付费资料，且仅开放「功能实测」及以上认证等级的模块。</div>
-          : detail.schematic_assets?.length > 0 && <p className="hint">含原理图等完整资料 {detail.schematic_assets.length} 份。</p>}
+        {/* 资料与来源：只显示实际填写了的项，避免一堆「—」 */}
+        {(detail.datasheet_url || detail.purchase_url
+          || detail.schematic_assets?.length || detail.pcb_assets?.length
+          || detail.code_repositories?.length) && !detail.assets_locked && (
+          <>
+            <h4>资料与来源</h4>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, fontSize: 13 }}>
+              {detail.datasheet_url && (
+                <a href={detail.datasheet_url} target="_blank" rel="noopener noreferrer">📄 数据手册 ↗</a>
+              )}
+              {detail.purchase_url && (
+                <a href={detail.purchase_url} target="_blank" rel="noopener noreferrer">
+                  🛒 {detail.purchase_platform || "购买"} ↗
+                </a>
+              )}
+              {(detail.schematic_assets || []).map((u: string, i: number) => (
+                <a key={`sch${i}`} href={u} target="_blank" rel="noopener noreferrer">
+                  📐 原理图{(detail.schematic_assets.length > 1 ? ` ${i + 1}` : "")} ↗
+                </a>
+              ))}
+              {(detail.pcb_assets || []).map((u: string, i: number) => (
+                <a key={`pcb${i}`} href={u} target="_blank" rel="noopener noreferrer">
+                  🧩 PCB{(detail.pcb_assets.length > 1 ? ` ${i + 1}` : "")} ↗
+                </a>
+              ))}
+              {(detail.code_repositories || []).map((u: string, i: number) => (
+                <a key={`repo${i}`} href={u} target="_blank" rel="noopener noreferrer">
+                  💾 代码仓库{(detail.code_repositories.length > 1 ? ` ${i + 1}` : "")} ↗
+                </a>
+              ))}
+            </div>
+          </>
+        )}
+        {detail.assets_locked && (
+          <div className="issue info">🔒 原理图 / PCB / 代码仓库为付费资料，且仅开放「功能实测」及以上认证等级的模块。</div>
+        )}
         <div style={{ textAlign: "right", marginTop: 12, display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <button className="btn ghost sm" onClick={onClose}>关闭</button>
           {onPick && <button className={"btn sm" + (picked ? " ok" : "")} onClick={onPick}>{picked ? "✓ 已选用" : "选用到方案"}</button>}

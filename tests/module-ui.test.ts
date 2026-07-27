@@ -385,3 +385,38 @@ describe("赛题中心的错误可见性", () => {
     expect(src).toContain("打开中…");
   });
 });
+
+describe("导航与字段归属（防回归）", () => {
+  it("「我的项目」不在流程导航中，入口在顶栏", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/Platform.tsx", "utf8");
+    // 它是项目管理入口，不是备赛流程的一步
+    expect(src).toContain("const FLOW_NAV = NAV.filter((n) => n.key !== \"projects\")");
+    expect(src).toContain("{FLOW_NAV.map((n) => (");
+    // 工作流标签同样排除
+    expect(src).toContain('{FLOW_NAV.filter((n) => n.key !== "home")');
+    // 顶栏有入口
+    expect(src).toContain('onClick={() => setPage("projects")}');
+  });
+
+  it("价格只在采购信息维护一处，基本信息区不重复", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/AdminClient.tsx", "utf8");
+    const priceFields = src.match(/<F label="价格[^"]*">/g) || [];
+    expect(priceFields.length, "价格字段出现多处会导致填写冲突").toBe(1);
+    // 且不再默认 0（自制模块无价格时不该显示 ¥0）
+    expect(src).not.toContain('value={draft.price ?? 0}');
+  });
+
+  it("模块详情展示数据手册/原理图/代码仓库，仅显示已填写项", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/pages-core.tsx", "utf8");
+    expect(src).toContain("资料与来源");
+    expect(src).toContain("detail.datasheet_url");
+    expect(src).toContain("detail.schematic_assets");
+    expect(src).toContain("detail.code_repositories");
+    expect(src).toContain("detail.purchase_url");
+    // 付费锁定时不展示链接
+    expect(src).toContain("!detail.assets_locked");
+  });
+});

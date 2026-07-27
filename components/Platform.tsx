@@ -24,9 +24,14 @@ const NAV = [
   { key: "code",     label: "代码生成", icon: "⌨️" },
   { key: "debug",    label: "调试助手", icon: "🔬" },
   { key: "testing",  label: "测试评分", icon: "🧪" },
-  { key: "projects", label: "我的项目", icon: "📁" },
   { key: "report",   label: "报告生成", icon: "📄" },
+  // 「我的项目」不属于备赛流程，入口放在右上角，不占流程步骤
+  { key: "projects", label: "我的项目", icon: "📁" },
 ] as const;
+
+/** 参与流程导航的页面（左侧栏与工作流标签）。
+ *  projects 是项目管理入口而非流程步骤，放在顶栏。 */
+const FLOW_NAV = NAV.filter((n) => n.key !== "projects");
 export type PageKey = (typeof NAV)[number]["key"];
 const PAGE_TITLE: Record<PageKey, string> = {
   home: "首页", solution: "方案生成", modules: "模块选型",
@@ -537,7 +542,7 @@ export default function Platform({ embed }: { embed: boolean }) {
           <div className="mark">电</div>
           <div><b>电赛智能体</b><small>NUEDC AGENT</small></div>
         </div>
-        {NAV.map((n) => (
+        {FLOW_NAV.map((n) => (
           <button key={n.key} className={"navitem" + (page === n.key ? " active" : "")} onClick={() => setPage(n.key)}>
             <span className="ic">{n.icon}</span>{n.label}
           </button>
@@ -570,12 +575,14 @@ export default function Platform({ embed }: { embed: boolean }) {
             {projects.map((p) => <option key={p.project_id} value={p.project_id}>{p.name}</option>)}
           </select>
           <span className="stagepill">{STAGE_LABEL[stage] || stage}</span>
+          <button className={"btn ghost sm" + (page === "projects" ? " on" : "")}
+            onClick={() => setPage("projects")} title="查看与管理全部项目">📁 我的项目</button>
           <button className="btn ghost sm" onClick={resetProject}>新建项目</button>
         </header>
 
         {page !== "home" && (
           <nav className="worktabs" aria-label="工作流程">
-            {NAV.filter((n) => n.key !== "home").map((n) => (
+            {FLOW_NAV.filter((n) => n.key !== "home").map((n) => (
               <button key={n.key} className={page === n.key ? "active" : ""} onClick={() => setPage(n.key)}>
                 <span className="ic">{n.icon}</span>{n.label}
               </button>
