@@ -607,3 +607,26 @@ describe("发布清单渲染的健壮性", () => {
     expect(fn).toMatch(/items\.push\(\{[\s\S]{0,120}passed:/);
   });
 });
+
+describe("选题只列可用题目", () => {
+  it("选题页显式要求 published_only，不受管理员身份影响", async () => {
+    const fs = await import("node:fs");
+    const ui = fs.readFileSync("components/pages-build.tsx", "utf8");
+    // 管理员登录时 API 默认会带出草稿，选题界面必须显式排除
+    expect(ui).toContain('published_only: "1"');
+    expect(ui).toContain("未发布的点了会 409");
+  });
+
+  it("API 支持 published_only 强制过滤", async () => {
+    const fs = await import("node:fs");
+    const api = fs.readFileSync("app/api/problems/route.ts", "utf8");
+    expect(api).toContain('sp.get("published_only") === "1"');
+    expect(api).toContain("publishedOnly: forcePublished || !staff");
+  });
+
+  it("无可选题目时说明需要先发布", async () => {
+    const fs = await import("node:fs");
+    const ui = fs.readFileSync("components/pages-build.tsx", "utf8");
+    expect(ui).toContain("需在后台完成解析、确认与发布后才能选用");
+  });
+});

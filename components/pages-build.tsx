@@ -1006,7 +1006,9 @@ function ProblemPicker({ ctx }: { ctx: any }) {
   const shown = official.slice(0, SHOW_LIMIT);
 
   useEffect(() => {
-    const qs = new URLSearchParams({ facets: "1" });
+    // 选题只列可直接采用的题目：未发布的点了会 409，
+    // 管理员登录时接口默认会带出草稿，这里显式排除
+    const qs = new URLSearchParams({ facets: "1", published_only: "1" });
     for (const [k, v] of Object.entries(filter)) if (v) qs.set(k === "q" ? "q" : k, v);
     fetch(`/api/problems?${qs}`)
       .then((r) => r.json())
@@ -1116,7 +1118,11 @@ function ProblemPicker({ ctx }: { ctx: any }) {
                 {p.requirement_count > 0 && <span className="hint"> · {p.requirement_count} 条需求</span>}
               </button>
             ))}
-            {!official.length && <span className="hint">没有匹配的已发布题目</span>}
+            {!official.length && (
+              <span className="hint">
+                没有匹配的<b>已发布</b>题目。题库里的题目需在后台完成解析、确认与发布后才能选用。
+              </span>
+            )}
             {official.length > SHOW_LIMIT && (
               <span className="hint" style={{ alignSelf: "center" }}>
                 共 {official.length} 条，仅显示前 {SHOW_LIMIT} 条，请继续缩小范围

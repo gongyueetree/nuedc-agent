@@ -10,8 +10,11 @@ const isStaff = (t: string) => t === "admin" || t === "lab";
 export async function GET(req: NextRequest) {
   const staff = isStaff(resolveTier(req));
   const sp = new URL(req.url).searchParams;
+  // published_only=1：选题界面显式要求只看可用题目。
+  // 否则按身份决定 —— 工作人员在后台需要看到草稿。
+  const forcePublished = sp.get("published_only") === "1";
   const rows = await listProblems({
-    publishedOnly: !staff,
+    publishedOnly: forcePublished || !staff,
     year: sp.get("year") ? Number(sp.get("year")) : undefined,
     contestType: sp.get("contest") || undefined,
     region: sp.get("region") || undefined,
