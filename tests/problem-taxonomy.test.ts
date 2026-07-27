@@ -157,3 +157,53 @@ describe("赛题中心登录态判定", () => {
     expect(src).toContain("problems: rows, staff");
   });
 });
+
+describe("题目详情与删除", () => {
+  it("前端按 API 实际返回的 version 字段读取，而非不存在的 problem", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    // API 返回 { version, requirements, scoringItems, notes, reviews, checklist }
+    expect(src).toContain("if (!d?.version)");
+    expect(src).toContain("requirements: d.requirements || []");
+    expect(src).not.toContain("setSel(d.problem)");
+  });
+
+  it("删除拒绝已发布题目，除非显式 force", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/problem-center.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function deleteProblem"));
+    expect(fn).toContain("publishedCount > 0 && !opts.force");
+    // 已被项目采用的题目同样需要确认
+    expect(fn).toContain("usedCount > 0 && !opts.force");
+    expect(fn).toContain("失去需求来源");
+  });
+
+  it("删除在事务内级联清理所有关联表", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/problem-center.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function deleteProblem"));
+    expect(fn).toContain("return withTransaction");
+    for (const t of ["problem_requirements", "problem_scoring_items", "problem_notes",
+      "problem_reviews", "problem_review_diffs", "problem_versions", "official_problems"]) {
+      expect(fn, `未清理 ${t}`).toContain(t);
+    }
+  });
+
+  it("删除端点要求工作人员权限", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/problems/[id]/route.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function DELETE"));
+    expect(fn).toContain("isStaff(resolveTier(req))");
+    expect(fn).toContain("status: 403");
+    expect(fn).toContain("status: 409");   // 有引用时冲突
+  });
+
+  it("前端删除有二次确认，强制删除再确认一次", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    const fn = src.slice(src.indexOf("async function removeProblem"), src.indexOf("async function openProblem"));
+    expect((fn.match(/confirm\(/g) || []).length).toBeGreaterThanOrEqual(2);
+    expect(fn).toContain("不可恢复");
+    expect(fn).toContain("force=1");
+  });
+});

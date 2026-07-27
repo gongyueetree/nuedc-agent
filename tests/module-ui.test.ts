@@ -375,7 +375,7 @@ describe("赛题中心的错误可见性", () => {
     expect(fn).toContain("d?.error");
     expect(fn).toContain("setMsg");
     // 返回体缺 problem 时也要提示，而不是 setSel(undefined) 后毫无变化
-    expect(fn).toContain("if (!d?.problem)");
+    expect(fn).toContain("if (!d?.version)");
   });
 
   it("打开过程中按钮显示加载态", async () => {

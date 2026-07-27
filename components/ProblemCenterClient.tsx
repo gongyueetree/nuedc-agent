@@ -32,6 +32,31 @@ export default function ProblemCenterClient() {
     if (r.ok) { setKey(""); load(); } else setMsg("密钥错误");
   }
 
+  async function removeProblem(p: any) {
+    const label = `${p.year} ${p.code} ${p.title}`;
+    if (!confirm(`确定删除「${label}」？\n\n将一并删除其所有版本、需求与评分项，且不可恢复。`)) return;
+    setMsg("");
+    const res = await fetch(`/api/problems/${p.problem_id}`, { method: "DELETE" });
+    const d = await res.json().catch(() => null);
+
+    if (res.status === 409) {
+      // 已发布或被项目引用：需要二次确认才强制删除
+      if (!confirm(`${d?.error || "该题目存在引用"}\n\n仍要强制删除吗？`)) return;
+      const f = await fetch(`/api/problems/${p.problem_id}?force=1`, { method: "DELETE" });
+      const fd = await f.json().catch(() => null);
+      if (!f.ok) { setMsg(`删除失败：${fd?.error || f.status}`); return; }
+      setMsg(`已强制删除「${label}」`);
+    } else if (!res.ok) {
+      setMsg(`删除失败：${d?.error || res.status}`);
+      return;
+    } else {
+      setMsg(`已删除「${label}」（含 ${d?.deleted?.versions ?? 0} 个版本）`);
+    }
+
+    if (sel?.problem_id === p.problem_id) setSel(null);
+    load();
+  }
+
   async function openProblem(id: string) {
     // 此前没有错误处理：接口报错时 d.problem 是 undefined，
     // setSel(undefined) 后界面毫无变化，表现为「点了没反应」
@@ -44,11 +69,21 @@ export default function ProblemCenterClient() {
         setMsg(`打开失败（HTTP ${res.status}）：${d?.error || "服务端未返回详情"}`);
         return;
       }
-      if (!d?.problem) {
-        setMsg("接口未返回题目内容。可能是该题尚无版本记录，或数据库结构与当前版本不一致。");
+      // 接口返回 { version, requirements, scoringItems, notes, reviews, checklist }，
+      // version 里已带 problem_id / year / code / title
+      if (!d?.version) {
+        setMsg("接口未返回版本内容。该题可能尚无版本记录。");
         return;
       }
-      setSel(d.problem);
+      // 平铺成前端期望的结构：版本字段 + requirements/scoringItems/notes
+      setSel({
+        ...d.version,
+        requirements: d.requirements || [],
+        scoringItems: d.scoringItems || [],
+        notes: d.notes || [],
+        reviews: d.reviews || [],
+        checklist: d.checklist || null,
+      });
 
       const dd = await fetch(`/api/problems/${id}/diffs`).then((r) => r.json()).catch(() => ({ diffs: [] }));
       setDiffs(dd.diffs || []);
@@ -233,9 +268,14 @@ export default function ProblemCenterClient() {
                       <td>{p.year}</td><td><b>{p.code}</b></td><td>{p.title}</td>
                       <td><span className={"chip " + (p.status === "published" ? "green" : "gold")}>{p.status}</span></td>
                       <td>{Number(p.open_diffs) > 0 ? <span className="chip red">{p.open_diffs}</span> : "—"}</td>
-                      <td><button className="btn ghost sm" disabled={loadingId === p.problem_id}
-                        onClick={() => openProblem(p.problem_id)}>
-                        {loadingId === p.problem_id ? "打开中…" : "打开"}</button></td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        <button className="btn ghost sm" disabled={loadingId === p.problem_id}
+                          onClick={() => openProblem(p.problem_id)}>
+                          {loadingId === p.problem_id ? "打开中…" : "打开"}</button>
+                        <button className="btn ghost sm danger" style={{ marginLeft: 4 }}
+                          title="删除该题目及其所有版本"
+                          onClick={() => removeProblem(p)}>删除</button>
+                      </td>
                     </tr>
                   ))}
                   {!list.length && <tr><td colSpan={6} className="hint">{taxonomyReady ? "还没有题目，右侧新建" : (

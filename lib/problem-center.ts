@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { db, ensureSchema, uid } from "./db";
+import { db, ensureSchema, uid, withTransaction } from "./db";
 import { parseTags, suggestTechTags, type ContestType, type TechCategory } from "./problem-taxonomy";
 
 /** 赛题中心（规范化模型）。
@@ -564,4 +564,58 @@ async function problemFacetsInner(publishedOnly = true) {
     regions: (regions.rows as any[]).map((r) => ({ value: String(r.region), count: Number(r.n) })),
     tech: Object.entries(techCount).map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count),
   };
+}
+
+
+/** 删除题目及其全部版本内容。
+ *  已发布版本可能被用户项目引用，因此默认拒绝删除 —— 
+ *  引用方会突然找不到需求来源。确需删除时用 force。 */
+export async function deleteProblem(problemId: string, opts: { force?: boolean } = {}): Promise<{
+  ok: boolean; error?: string; deleted?: { versions: number; requirements: number };
+}> {
+  await ensureSchema();
+
+  const pub = await db().execute({
+    sql: "SELECT COUNT(*) n FROM problem_versions WHERE problem_id=? AND status='published'",
+    args: [problemId],
+  });
+  const publishedCount = Number((pub.rows[0] as any)?.n || 0);
+  if (publishedCount > 0 && !opts.force) {
+    return {
+      ok: false,
+      error: `该题有 ${publishedCount} 个已发布版本，用户项目可能正在引用。` +
+             `确认要删除请使用强制删除。`,
+    };
+  }
+
+  // 引用检查：已被项目采用的题目删除后，那些项目会失去需求来源
+  const used = await db().execute({
+    sql: "SELECT COUNT(*) n FROM projects WHERE problem_id=?",
+    args: [problemId],
+  }).catch(() => ({ rows: [{ n: 0 }] as any[] }));
+  const usedCount = Number((used.rows[0] as any)?.n || 0);
+  if (usedCount > 0 && !opts.force) {
+    return { ok: false, error: `已有 ${usedCount} 个项目采用该题目，删除会使其失去需求来源。` };
+  }
+
+  return withTransaction(async (tx) => {
+    const vs = await tx.execute({
+      sql: "SELECT version_id FROM problem_versions WHERE problem_id=?", args: [problemId],
+    });
+    const versionIds = (vs.rows as any[]).map((r) => String(r.version_id));
+
+    let reqCount = 0;
+    for (const vid of versionIds) {
+      const rq = await tx.execute({ sql: "DELETE FROM problem_requirements WHERE version_id=? RETURNING id", args: [vid] });
+      reqCount += rq.rows.length;
+      await tx.execute({ sql: "DELETE FROM problem_scoring_items WHERE version_id=?", args: [vid] });
+      await tx.execute({ sql: "DELETE FROM problem_notes WHERE version_id=?", args: [vid] });
+      await tx.execute({ sql: "DELETE FROM problem_reviews WHERE version_id=?", args: [vid] });
+      await tx.execute({ sql: "DELETE FROM problem_review_diffs WHERE version_id=?", args: [vid] });
+    }
+    await tx.execute({ sql: "DELETE FROM problem_versions WHERE problem_id=?", args: [problemId] });
+    await tx.execute({ sql: "DELETE FROM official_problems WHERE problem_id=?", args: [problemId] });
+
+    return { ok: true, deleted: { versions: versionIds.length, requirements: reqCount } };
+  });
 }

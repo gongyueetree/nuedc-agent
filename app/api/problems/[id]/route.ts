@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { resolveTier } from "@/lib/auth";
 import {
   getVersionContent, getDraftVersion, getPublishedVersion, saveExtraction,
-  createDraftVersion, publicationChecklist, addReview,
+  createDraftVersion, publicationChecklist, addReview, deleteProblem,
 } from "@/lib/problem-center";
 import { db, ensureSchema } from "@/lib/db";
 
@@ -90,4 +90,16 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({ error: String(e?.message || e) }, { status: 409 });
   }
   return NextResponse.json({ ok: true });
+}
+
+
+export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {
+  if (!isStaff(resolveTier(req))) {
+    return NextResponse.json({ error: "需要工作人员权限" }, { status: 403 });
+  }
+  // 已发布或已被项目引用的题目需显式 force，避免误删导致引用方失去需求来源
+  const force = new URL(req.url).searchParams.get("force") === "1";
+  const r = await deleteProblem(params.id, { force });
+  if (!r.ok) return NextResponse.json({ error: r.error }, { status: 409 });
+  return NextResponse.json(r);
 }
