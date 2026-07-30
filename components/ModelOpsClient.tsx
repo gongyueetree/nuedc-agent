@@ -24,8 +24,15 @@ export default function ModelOpsClient() {
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     if (!authed) return;
-    const t = setInterval(load, 15_000);   // 15 秒刷新
-    return () => clearInterval(t);
+    // 60 秒刷新即可，且标签页不可见时暂停 —— 运维台常被挂在后台，
+    // 15 秒一次会持续消耗数据库流量
+    let t: any = setInterval(load, 60_000);
+    const onVis = () => {
+      if (document.hidden) { clearInterval(t); t = null; }
+      else if (!t) { load(); t = setInterval(load, 60_000); }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { if (t) clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
   }, [authed, load]);
 
   async function login() {

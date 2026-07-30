@@ -25,7 +25,10 @@ import type { AgentType, ProjectStage } from "../lib/types";
 const WORKER_ID = process.env.WORKER_ID || `${hostname()}:${process.pid}`;
 const HEAVY_SLOTS = Number(process.env.WORKER_HEAVY_SLOTS || 2);
 const LIGHT_SLOTS = Number(process.env.WORKER_LIGHT_SLOTS || 6);
-const POLL_MS = Number(process.env.WORKER_POLL_MS || 1500);
+// 空闲轮询间隔。默认 6 秒而非 1.5 秒 —— 每次都要查库，
+// 1.5 秒一天近 6 万次请求，对按流量计费的托管数据库是明显开销。
+// 需要更快响应时用 WORKER_POLL_MS 显式调小。
+const POLL_MS = Number(process.env.WORKER_POLL_MS || 6000);
 /** 是否允许 Worker 自行执行 DDL。生产默认关闭：
  *  迁移应由部署流程统一执行，避免多个 Worker 实例在生产库上并发跑 DDL，
  *  也避免 Worker 因权限过大而在 schema 不一致时做出意外变更。 */
@@ -209,8 +212,10 @@ async function aliveLoop() {
     schemaWaiting, autoMigrate: AUTO_MIGRATE,
   });
   await report();   // 启动即上报一次，缩短 CI 等待
+  // 存活上报间隔需小于 WORKER_LIVE_WINDOW_SEC（60s），取 45s 留足余量
+  const aliveMs = Number(process.env.WORKER_ALIVE_MS || 45_000);
   while (!shuttingDown) {
-    await sleep(15_000);
+    await sleep(aliveMs);
     if (!shuttingDown) await report();
   }
 }
@@ -227,7 +232,7 @@ async function reclaimLoop() {
       await bumpWorkerMetric(WORKER_ID, "reclaim_db_errors", String(e?.message || e));
       log("回收循环异常:", String(e?.message || e).slice(0, 120));
     }
-    await sleep(30_000);
+    await sleep(Number(process.env.WORKER_RECLAIM_MS || 90_000));
   }
 }
 
