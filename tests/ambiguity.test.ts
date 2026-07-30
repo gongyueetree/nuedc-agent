@@ -148,3 +148,47 @@ describe("端到端接线", () => {
     expect(src).toContain("采用 {o.key}");
   });
 });
+
+describe("双模复核的真实性（学生实测：两边都是 gemini）", () => {
+  it("只有一家 Provider 时如实告知无法复核，不假装双模", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/problems/[id]/extract/route.ts", "utf8");
+    expect(src).toContain("const otherProvider = pickOther(runA.provider)");
+    expect(src).toContain("if (!otherProvider)");
+    expect(src).toContain("无法进行双模交叉复核");
+    // 说明如何启用真正的复核
+    expect(src).toContain("MODEL_PROVIDER_FALLBACK");
+  });
+
+  it("复核这一遍也要传 PDF，否则会全判成未提取到", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/problems/[id]/extract/route.ts", "utf8");
+    const runB = src.slice(src.indexOf("const runB = await modelGateway.run"));
+    expect(runB).toContain("pdfBase64");
+    expect(runB).toContain('pdfBase64 ? "PDF_EXTRACT"');
+  });
+
+  it("条目数异常时给出粒度提醒", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/problems/[id]/extract/route.ts", "utf8");
+    expect(src).toContain("granularityWarning");
+    expect(src).toContain("reqCount > 30");
+    expect(src).toContain("10~25 条");
+  });
+
+  it("提示词约束需求粒度，排除任务概述", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/problems/[id]/extract/route.ts", "utf8");
+    expect(src).toContain("可以逐条验收");
+    expect(src).toContain("不收录：任务概述与背景");
+    // 同时约束单位写法，避免 target="1MHz" + unit="Hz"
+    expect(src).toContain("单位只写在 unit 里");
+  });
+
+  it("前端明确展示粒度与复核警告", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
+    expect(src).toContain("granularity_warning");
+    expect(src).toContain("不能混在括号里一笔带过");
+  });
+});

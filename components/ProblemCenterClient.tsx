@@ -119,8 +119,14 @@ export default function ProblemCenterClient() {
     }).then((x) => x.json()).catch(() => null);
     setBusy("");
     if (r?.ok) {
-      setMsg(`提取完成：需求 ${r.requirements} 条、评分项 ${r.scoring_items ?? 0} 项` +
-        (r.dual_review ? `，${r.provider_a} 与 ${r.provider_b} 复核发现 ${r.diffs} 处差异（${r.critical_diffs} 处关键）` : `（${r.warning || "未复核"}）`));
+      const parts = [`提取完成：需求 ${r.requirements} 条、评分项 ${r.scoring_items ?? 0} 项`];
+      if (r.dual_review) {
+        parts.push(`${r.provider_a} 与 ${r.provider_b} 复核发现 ${r.diffs} 处差异（${r.critical_diffs} 处关键）`);
+      }
+      // 条目数异常与无法复核都要明确告知，不能混在括号里一笔带过
+      if (r.granularity_warning) parts.push(`\n\n⚠ ${r.granularity_warning}`);
+      if (r.warning) parts.push(`\n\n⚠ ${r.warning}`);
+      setMsg(parts.join("，").replace(/，\n/g, "\n"));
       openProblem(sel.problem_id);
     } else setMsg(r?.error || "提取失败");
   }
@@ -143,7 +149,14 @@ export default function ProblemCenterClient() {
       body: JSON.stringify({ raw_text: text, dual_review: true }),
     }).then((x) => x.json()).catch(() => null);
     setBusy("");
-    if (r?.ok) { setMsg(`提取完成，${r.diffs ?? 0} 处差异待确认`); openProblem(sel.problem_id); }
+    if (r?.ok) {
+      const parts = [`提取完成：需求 ${r.requirements ?? 0} 条`];
+      if (r.dual_review) parts.push(`${r.diffs ?? 0} 处差异待确认`);
+      if (r.granularity_warning) parts.push(`\n\n⚠ ${r.granularity_warning}`);
+      if (r.warning) parts.push(`\n\n⚠ ${r.warning}`);
+      setMsg(parts.join("，").replace(/，\n/g, "\n"));
+      openProblem(sel.problem_id);
+    }
     else setMsg(r?.error || "提取失败");
   }
 
