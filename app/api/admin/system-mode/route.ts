@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveTier } from "@/lib/auth";
 import { getSystemMode, setSystemMode, getPeakConfig, SYSTEM_MODES, MODE_LABEL, type SystemMode } from "@/lib/system-mode";
-import { db, ensureSchema } from "@/lib/db";
+import { db } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -11,7 +11,8 @@ export async function GET() {
   const peak = await getPeakConfig();
   let queued = 0;
   try {
-    await ensureSchema();
+    // 不调 ensureSchema：这是高频轮询端点，每次执行补列语句会持续消耗
+    // 数据库传输配额（Neon 免费版曾因此耗尽额度）。schema 由其它路径保证。
     const rs = await db().execute({ sql: "SELECT COUNT(*) n FROM agent_tasks WHERE status IN ('queued','running')", args: [] });
     queued = Number(rs.rows[0]?.n || 0);
   } catch { /* 忽略 */ }

@@ -112,6 +112,11 @@ function txPool(): { pool: any; kind: string } {
       }
       if (neonConfig.webSocketConstructor) {
         _txPool = new NeonPool({ connectionString: url, max: Number(process.env.PG_POOL_MAX || 5) });
+        // 必须监听 error：连接被对端关闭时 pg-pool 会 emit error，
+        // 无监听器则升级为未捕获异常直接终止进程（实测本地脚本因此崩溃）
+        _txPool.on("error", (e: any) => {
+          console.warn("[db] 事务连接池异常:", String(e?.message || e).slice(0, 160));
+        });
         _txPoolKind = "neon_ws";
         return { pool: _txPool, kind: _txPoolKind };
       }
@@ -127,6 +132,9 @@ function txPool(): { pool: any; kind: string } {
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
       ssl: isNeon || /sslmode=require/.test(url) ? { rejectUnauthorized: false } : undefined,
+    });
+    _txPool.on("error", (e: any) => {
+      console.warn("[db] 事务连接池异常:", String(e?.message || e).slice(0, 160));
     });
     _txPoolKind = "pg";
     return { pool: _txPool, kind: _txPoolKind };

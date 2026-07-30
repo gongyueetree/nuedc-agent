@@ -86,8 +86,16 @@ export default function Platform({ embed }: { embed: boolean }) {
   useEffect(() => {
     const load = () => api("/api/admin/system-mode").then((d) => { if (!d.error) setSysMode(d); }).catch(() => {});
     load();
-    const t = setInterval(load, 30_000);
-    return () => clearInterval(t);
+    // 2 分钟一次即可 —— 降级提示不需要秒级实时，而每次轮询都要查库，
+    // 30 秒一次一天近 3000 次请求，会明显消耗数据库传输配额。
+    // 标签页不可见时停止轮询（挂着不用的页面不该继续烧配额）。
+    let t: any = setInterval(load, 120_000);
+    const onVis = () => {
+      if (document.hidden) { clearInterval(t); t = null; }
+      else if (!t) { load(); t = setInterval(load, 120_000); }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { if (t) clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
   }, []);
 
   useEffect(() => {

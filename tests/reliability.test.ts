@@ -641,3 +641,23 @@ describe("治理统计的缺列容错", () => {
     expect(src).toContain("orgRef: identity.org");
   });
 })
+
+describe("数据库传输配额控制", () => {
+  it("system-mode 高频端点不执行 ensureSchema", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/admin/system-mode/route.ts", "utf8");
+    // 每次轮询跑 19 条补列语句会持续消耗传输配额
+    expect(src).not.toMatch(/await ensureSchema\(\)/);
+    expect(src).toContain("高频轮询端点");
+  });
+
+  it("轮询间隔不低于 2 分钟且页面隐藏时暂停", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/Platform.tsx", "utf8");
+    expect(src).toContain("120_000");
+    expect(src).toContain("visibilitychange");
+    expect(src).toContain("document.hidden");
+    // 不得再有 30 秒轮询
+    expect(src).not.toContain("setInterval(load, 30_000)");
+  });
+})
