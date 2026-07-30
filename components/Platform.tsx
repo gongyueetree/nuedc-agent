@@ -423,7 +423,14 @@ export default function Platform({ embed }: { embed: boolean }) {
       if (projectId) await advanceStage("SOLUTION_CANDIDATES");
     } else if ((r as any).degraded) {
       say("agent", (r as any).degraded.reason);
-    } else say("agent", "生成失败：" + (r.message || "") + "\n\n🔍 诊断建议：打开 /api/diag?full=1 可直接查看 LLM 链路状态（Key、连通性、JSON 生成能力），会明确指出坏在哪一环。");
+    } else {
+      // 学生端不暴露 Key、连通性、内部诊断接口这类运维措辞（学生测试反馈 P1-5）
+      const detail = String(r.message || "");
+      const serviceIssue = /LLM|模型|运行失败|HTTP 5|超时|timeout|unavailable/i.test(detail);
+      say("agent", serviceIssue
+        ? "生成失败：服务暂时不可用。\n\n你的需求已保存，稍后点「生成方案」重试即可，无需重新粘贴赛题。\n若持续失败请联系指导老师。"
+        : `生成失败：${detail || "请稍后重试"}`);
+    }
   }
 
   async function approveSolution(sol: any) {

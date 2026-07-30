@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { db, ensureSchema, uid, withTransaction } from "./db";
+import { normalizeTarget } from "./requirement-validate";
+import { parseOptions, parseDecision, type Ambiguity } from "./ambiguity";
 import { parseTags, suggestTechTags, type ContestType, type TechCategory } from "./problem-taxonomy";
 
 /** 赛题中心（规范化模型）。
@@ -159,13 +161,16 @@ export async function saveExtraction(versionId: string, data: {
         no = `${no}-${n}`;
       }
       seen.add(no);
+      // 入库前规范化：模型常把单位写进 target（"1Hz~1MHz" + unit "Hz"），
+      // 显示层再拼一次就成了 "1Hz~1MHzHz"，并会一路污染方案/BOM/报告
+      const nt = normalizeTarget(r);
       await db().execute({
         sql: `INSERT INTO problem_requirements (req_id, version_id, requirement_no, type, description, target, unit,
                 tolerance, priority, verification_method, source_page, source_quote, status, sort_order)
               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         args: [uid("PRQ"), versionId, no,
-          r.type || null, r.description || "", r.target != null ? String(r.target) : null, r.unit || null,
-          r.tolerance || null, r.priority || "mandatory", r.verification_method || null,
+          r.type || null, r.description || "", nt.target, nt.unit,
+          nt.tolerance, r.priority || "mandatory", r.verification_method || null,
           r.source_page != null ? Number(r.source_page) : null, r.source_quote || r.source || null,
           r.status || "AI_EXTRACTED", i],
       });
@@ -189,10 +194,19 @@ export async function saveExtraction(versionId: string, data: {
   if (data.ambiguities) {
     await db().execute({ sql: "DELETE FROM problem_notes WHERE version_id=? AND kind='ambiguity'", args: [versionId] });
     for (const a of data.ambiguities) {
-      const text = typeof a === "string" ? a : (a?.description || JSON.stringify(a));
+      const text = typeof a === "string" ? a : (a?.description || a?.content || JSON.stringify(a));
+      // 候选解释与严重度：让工作人员能直接选 A/B 而不是自己想
+      const opts = typeof a === "object" ? parseOptions(a?.options) : [];
+      // 涉及指标数值、误差要求、测量对象的歧义会直接影响方案与评分，标为 critical
+      const isCritical = typeof a === "object" && a?.severity === "critical"
+        ? true
+        : /误差|精度|范围|多少|未给出|未明确|单路还是|哪一?个|是否/.test(String(text));
       await db().execute({
-        sql: "INSERT INTO problem_notes (note_id, version_id, kind, content) VALUES (?,?,'ambiguity',?)",
-        args: [uid("PN"), versionId, String(text).slice(0, 1000)],
+        sql: `INSERT INTO problem_notes (note_id, version_id, kind, content, options, severity)
+              VALUES (?,?,'ambiguity',?,?,?)`,
+        args: [uid("PN"), versionId, String(text).slice(0, 1000),
+          opts.length ? JSON.stringify(opts) : null,
+          isCritical ? "critical" : "normal"],
       });
     }
   }
@@ -630,4 +644,52 @@ export async function deleteProblem(problemId: string, opts: { force?: boolean }
 
     return { ok: true, deleted: { versions: versionIds.length, requirements: reqCount } };
   });
+}
+
+/** 读取某版本的题面歧义（含候选解释与决策） */
+export async function getAmbiguities(versionId: string): Promise<Ambiguity[]> {
+  await ensureSchema();
+  const rs = await db().execute({
+    sql: `SELECT note_id, content, resolved, resolution, options, decision,
+            COALESCE(severity, 'normal') AS severity, decided_by, decided_at
+          FROM problem_notes WHERE version_id=? AND kind='ambiguity'
+          ORDER BY severity, created_at`,
+    args: [versionId],
+  });
+  return (rs.rows as any[]).map((r) => ({
+    note_id: String(r.note_id),
+    content: String(r.content),
+    severity: String(r.severity) === "critical" ? "critical" : "normal",
+    options: parseOptions(r.options),
+    resolved: Number(r.resolved) === 1,
+    decision: parseDecision(r.decision) ?? (r.resolution ? { kind: "custom", note: String(r.resolution) } : null),
+    decided_by: r.decided_by ? String(r.decided_by) : null,
+    decided_at: r.decided_at ? String(r.decided_at) : null,
+  }));
+}
+
+/** 记录一项歧义决策。校验不通过时返回错误说明。 */
+export async function decideAmbiguity(noteId: string, decision: any, decidedBy: string): Promise<{
+  ok: boolean; error?: string;
+}> {
+  await ensureSchema();
+  const { parseDecision: pd, validateDecision } = await import("./ambiguity");
+  const d = pd(decision);
+  if (!d) return { ok: false, error: "决策内容无法识别" };
+
+  const cur = await db().execute({
+    sql: "SELECT options FROM problem_notes WHERE note_id=?", args: [noteId],
+  });
+  if (!cur.rows.length) return { ok: false, error: "歧义记录不存在" };
+
+  const err = validateDecision(d, parseOptions((cur.rows[0] as any).options));
+  if (err) return { ok: false, error: err };
+
+  await db().execute({
+    sql: `UPDATE problem_notes SET resolved=1, decision=?, decided_by=?, decided_at=now(),
+            resolution=? WHERE note_id=?`,
+    args: [JSON.stringify(d), decidedBy,
+      d.kind === "adopt_option" ? `采用解释 ${d.optionKey}` : (d.note || d.kind), noteId],
+  });
+  return { ok: true };
 }

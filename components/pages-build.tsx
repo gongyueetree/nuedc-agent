@@ -526,12 +526,18 @@ export function CodePage({ ctx }: { ctx: any }) {
             <option key={bl.block_id} value={bl.module_id || bl.name}>{bl.name}{bl.module_id ? ` (${bl.module_id})` : ""}</option>
           ))}
         </select>
-        <button className="btn" style={{ width: "100%" }} disabled={ctx.busy} onClick={async () => {
+        <button className="btn" style={{ width: "100%" }} onClick={async () => {
           setErr("");
           const r = await ctx.runCode(target);
           if (!r.ok) setErr(r.message || "生成失败");
           else setActive(0);
-        }}>{ctx.busy ? "生成中…" : "⚡ 生成代码"}</button>
+        }} disabled={ctx.busy || !ctx.chosenSolution}>{ctx.busy ? "生成中…" : "⚡ 生成代码"}</button>
+        {!ctx.chosenSolution && (
+          <p className="hint" style={{ marginTop: 6 }}>
+            需要先在「方案生成」确认一套主方案 —— 代码要依据方案里的主控型号、
+            引脚分配与外设资源生成，否则只能产出通用模板。
+          </p>
+        )}
         {err && <div className="issue blocker" style={{ marginTop: 10 }}>{err}</div>}
         {b && (
           <>
@@ -756,11 +762,17 @@ export function ReportPage({ ctx }: { ctx: any }) {
             <label><input type="checkbox" checked={incCode} onChange={() => setIncCode(!incCode)} />包含代码文件清单</label>
             <label><input type="checkbox" checked={incDebug} onChange={() => setIncDebug(!incDebug)} />包含调试记录</label>
           </div>
-          <button className="btn" style={{ width: "100%", marginTop: 12 }} disabled={ctx.busy} onClick={async () => {
+          <button className="btn" style={{ width: "100%", marginTop: 12 }} onClick={async () => {
             setErr("");
             const res = await ctx.runReport({ includeBom: incBom, includeCode: incCode, includeDebug: incDebug });
             if (!res.ok) setErr(res.message || "生成失败");
-          }}>{ctx.busy ? "撰写中…" : md ? "🔄 重新生成" : "📄 生成报告"}</button>
+          }} disabled={ctx.busy || !ctx.chosenSolution}>{ctx.busy ? "撰写中…" : md ? "🔄 重新生成" : "📄 生成报告"}</button>
+          {!ctx.chosenSolution && (
+            <p className="hint" style={{ marginTop: 6 }}>
+              需要先确认主方案 —— 报告的方案论证、系统设计、理论分析章节都基于它，
+              缺少时只能生成空壳。
+            </p>
+          )}
           {err && <div className="issue blocker" style={{ marginTop: 10 }}>{err}</div>}
           {md && ctx.projectId && (
             <>

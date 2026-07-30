@@ -217,7 +217,21 @@ export function TestingPage({ ctx }: { ctx: any }) {
           <span className="hint">仪器 / 测点 / 步骤 / 判据由测试 Agent 生成；判定与得分为纯规则计算，不经过大模型。</span>
           <span style={{ flex: 1 }} />
           <button className="btn ghost sm" disabled={ctx.busy} onClick={ctx.runTestPlan}>{plan.length ? "重新生成计划" : "生成测试计划"}</button>
-          <button className="btn sm" disabled={ctx.busy} onClick={() => ctx.runScore(Object.values(records))}>计算判定与得分</button>
+          <button className="btn sm" disabled={ctx.busy}
+            onClick={() => {
+              // 学生测试反馈：空数据点击后没有任何反馈
+              const filled = Object.values(records).filter((r: any) =>
+                (r?.measured != null && String(r.measured).trim() !== "") || r?.verdict);
+              if (!filled.length) {
+                alert("还没有录入任何测试数据。\n\n请先在上方逐条填写实测值或点选通过/不通过，再计算得分。");
+                return;
+              }
+              const total = Object.keys(records).length;
+              if (filled.length < total && !confirm(
+                `只录入了 ${filled.length}/${total} 项，未录入的会按「待补充」处理、不计入得分。\n\n继续计算？`
+              )) return;
+              ctx.runScore(Object.values(records));
+            }}>计算判定与得分</button>
         </div>
       </div>
 

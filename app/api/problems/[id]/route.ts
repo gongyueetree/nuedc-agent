@@ -32,7 +32,16 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   if (!staff) delete (content.version as any).raw_text;
 
   const checklist = staff ? await publicationChecklist(versionId) : null;
-  return NextResponse.json({ ...content, checklist });
+  // 结构化歧义（含候选解释与决策），供前端渲染决策入口
+  const { getAmbiguities } = await import("@/lib/problem-center");
+  const { canAdoptSolution } = await import("@/lib/ambiguity");
+  const ambiguities = await getAmbiguities(versionId);
+  const gate = canAdoptSolution(ambiguities);
+  return NextResponse.json({
+    ...content, checklist,
+    ambiguities: staff ? ambiguities : ambiguities.filter((a) => a.resolved),
+    ambiguity_gate: { ok: gate.ok, blocking: gate.blocking.length, pending_normal: gate.pendingNormal },
+  });
 }
 
 /** PATCH：编辑草稿内容 / 确认需求 / 新建版本 / 提交审核 */
@@ -61,18 +70,57 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({ ok: true });
   }
   if (b.action === "confirm_all") {
-    await db().execute({
-      sql: `UPDATE problem_requirements SET status='CONFIRMED', confirmed_by=?, confirmed_at=now()
-            WHERE version_id=? AND status NOT IN ('CONFIRMED','REJECTED')`,
-      args: [tier, versionId],
+    // 一键确认不得覆盖有阻断错误的需求 —— 学生测试中
+    // 「1Hz~1MHzHz」「≤1%%」这类解析错误被一并确认后，
+    // 会传播到方案、BOM、代码与报告，且「已确认」失去可信含义
+    const { validateRequirements } = await import("@/lib/requirement-validate");
+    const all = await db().execute({
+      sql: `SELECT req_id, requirement_no, description, type, target, unit, tolerance,
+              source_quote, source_page, status
+            FROM problem_requirements WHERE version_id=? ORDER BY sort_order`,
+      args: [versionId],
     });
-    return NextResponse.json({ ok: true });
+    const rows = all.rows as any[];
+    const { byIndex, blockingIndexes } = validateRequirements(rows);
+
+    if (blockingIndexes.length && b.force !== true) {
+      return NextResponse.json({
+        error: `${blockingIndexes.length} 条需求存在必须先修正的错误，不能批量确认`,
+        blocking: blockingIndexes.map((i) => ({
+          requirement_no: rows[i].requirement_no,
+          description: String(rows[i].description || "").slice(0, 60),
+          issues: (byIndex.get(i) || []).filter((x) => x.severity === "error").map((x) => x.message),
+        })),
+      }, { status: 422 });
+    }
+
+    // 只确认没有阻断错误的那些；有错误的保持待确认，除非显式 force
+    const skip = new Set(blockingIndexes.map((i) => String(rows[i].req_id)));
+    const targets = rows
+      .filter((r) => !["CONFIRMED", "REJECTED"].includes(String(r.status)))
+      .filter((r) => b.force === true || !skip.has(String(r.req_id)));
+
+    for (const r of targets) {
+      await db().execute({
+        sql: `UPDATE problem_requirements SET status='CONFIRMED', confirmed_by=?, confirmed_at=now()
+              WHERE req_id=?`,
+        args: [tier, r.req_id],
+      });
+    }
+    return NextResponse.json({ ok: true, confirmed: targets.length, skipped: skip.size });
   }
   if (b.action === "resolve_note") {
-    await db().execute({
-      sql: "UPDATE problem_notes SET resolved=1, resolution=? WHERE note_id=?",
-      args: [String(b.resolution || "已人工处理").slice(0, 300), b.note_id],
-    });
+    // 歧义必须记录一项具体决策，而不是简单标记「已人工处理」——
+    // 学生测试指出：只有文本提示、没有决策入口时，题意悬空会一路影响下游
+    const { decideAmbiguity } = await import("@/lib/problem-center");
+    const decision = b.decision ?? (b.resolution ? { kind: "custom", note: String(b.resolution) } : null);
+    if (!decision) {
+      return NextResponse.json({
+        error: "需要给出决策：采用某项解释 / 自定义解释 / 保持开放（并说明保守假设）/ 需询问指导教师",
+      }, { status: 400 });
+    }
+    const r = await decideAmbiguity(String(b.note_id), decision, `admin:${tier}`);
+    if (!r.ok) return NextResponse.json({ error: r.error }, { status: 422 });
     return NextResponse.json({ ok: true });
   }
   if (b.action === "review") {

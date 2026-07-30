@@ -576,7 +576,7 @@ describe("发布清单的可操作性", () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("components/ProblemCenterClient.tsx", "utf8");
     const fn = src.slice(src.indexOf("async function confirmAll"), src.indexOf("async function resolveAllNotes"));
-    expect(fn).toContain("请先核对数值单位与基本/发挥分类");
+    expect(fn).toMatch(/核对数值单位与基本\/发挥分类/);
   });
 });
 

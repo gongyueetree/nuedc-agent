@@ -1,6 +1,7 @@
 // 工程类 Agent：方案架构、接口集成检查、BOM 整理、备料规划
 import { llmJson } from "../llm";
 import { registerAgent, loadModuleIndex, moduleCatalogForLlm, sawPartial, currentAgentContext } from "./base";
+import { ambiguityContextForAgent, type Ambiguity } from "../ambiguity";
 import { buildContext } from "../model-gateway/context-builder";
 import { buildModuleContext, extractTags } from "../module-search";
 import { solutionSchema, connectionSchema, powerRailSchema, parseArrayLoose, bomItemSchema } from "../agent-schemas";

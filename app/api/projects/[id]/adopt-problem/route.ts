@@ -16,6 +16,22 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
   const pv: any = await getPublishedVersion(problem_id);
   if (!pv) return NextResponse.json({ error: "该题目尚未发布" }, { status: 409 });
+
+  // 关键歧义未决时不允许采用为项目需求 —— 悬空的题意会一路影响
+  // 方案、BOM、代码与评分，而学生往往不会回头核对
+  const { getAmbiguities } = await import("@/lib/problem-center");
+  const { canAdoptSolution } = await import("@/lib/ambiguity");
+  const ambs = await getAmbiguities(String(pv.version_id));
+  const gate = canAdoptSolution(ambs);
+  if (!gate.ok) {
+    return NextResponse.json({
+      error: `该题目有 ${gate.blocking.length} 项关键题意待澄清，工作人员确认后才能采用`,
+      blocking_ambiguities: gate.blocking.map((a) => ({
+        content: a.content,
+        options: a.options.map((o) => `${o.key}. ${o.text}`),
+      })),
+    }, { status: 409 });
+  }
   const content = await getVersionContent(String(pv.version_id));
   if (!content) return NextResponse.json({ error: "版本内容缺失" }, { status: 404 });
   const p: any = content.version;

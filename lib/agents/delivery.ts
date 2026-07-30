@@ -132,13 +132,15 @@ registerAgent("report_composer", async (input) => {
 
   const md = await llmComplete({
     system: `你是电赛设计报告撰写专家。按全国大学生电子设计竞赛设计报告规范生成 Markdown 报告，章节：
-摘要（含关键词）/ 1 方案论证与比较 / 2 系统总体设计（含系统框图，用 mermaid 描述）/ 3 理论分析与参数计算 / 4 电路与程序设计 / 5 测试方案与测试结果 / 6 结论 / 附录（元器件清单、程序清单说明）
+摘要（含关键词）/ 1 题意分析与设计假设 / 2 方案论证与比较 / 3 系统总体设计（含系统框图，用 mermaid 描述）/ 4 理论分析与参数计算 / 5 电路与程序设计 / 6 测试方案与测试结果 / 7 结论 / 附录（元器件清单、程序清单说明）
 硬规则：
 1. 所有具体数据（型号、电压、采样率、测试结果）只能来自输入的项目数据，禁止编造
 2. 缺失的数据写 "【待补充：xxx】"占位，不得虚构测试数值
 3. 方案论证部分必须对比输入中的候选方案并说明选择理由
 4. 测试结果以表格呈现，并与需求指标（REQ）逐条对照
-5. 语言规范、工程化，符合评审口味；篇幅控制在正文 6000 字以内`,
+5. 若输入含【题意分析与设计假设】，原样纳入第 1 章 ——
+   评委需要看到题面表述不明确时的判断依据，不得改写或省略
+6. 语言规范、工程化，符合评审口味；篇幅控制在正文 6000 字以内`,
     messages: [
       {
         role: "user",
@@ -148,6 +150,7 @@ registerAgent("report_composer", async (input) => {
 【BOM】${JSON.stringify(bom || {}).slice(0, 3000)}
 【测试结果】${JSON.stringify(test_results || "（暂无，请占位）").slice(0, 3000)}
 【调试记录摘要】${JSON.stringify(debug_notes || []).slice(0, 2000)}
+${input.design_assumptions ? `\n【题意分析与设计假设】（原样纳入第 1 章）\n${String(input.design_assumptions).slice(0, 3000)}` : ""}
 【代码文件清单】${JSON.stringify(input.code_files || "（未提供，附录中省略代码清单）").slice(0, 1500)}
 【队伍信息】${JSON.stringify(team || {})}`,
       },

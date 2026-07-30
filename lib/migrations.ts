@@ -569,6 +569,18 @@ CREATE INDEX IF NOT EXISTS idx_problems_contest ON official_problems(contest_typ
 CREATE INDEX IF NOT EXISTS idx_problems_year_code ON official_problems(year DESC, code);
 `,
   },
+  {
+    id: 22,
+    name: "ambiguity_decision",
+    sql: `
+ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS options TEXT;
+ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS decision TEXT;
+ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS decided_by TEXT;
+ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
+ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS severity TEXT DEFAULT 'normal';
+CREATE INDEX IF NOT EXISTS idx_pnote_decision ON problem_notes(version_id, kind, resolved);
+`,
+  },
 ];
 
 /** 关键列的幂等补丁。任何因「已发布迁移被追加内容」而可能缺失的列都列在这里，
@@ -593,6 +605,11 @@ const CRITICAL_COLUMNS = [
   "ALTER TABLE official_problems ADD COLUMN IF NOT EXISTS difficulty TEXT",
   "ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS schema_waiting INTEGER DEFAULT 0",
   "ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS auto_migrate INTEGER DEFAULT 0",
+  "ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS options TEXT",
+  "ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS decision TEXT",
+  "ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS decided_by TEXT",
+  "ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ",
+  "ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS severity TEXT DEFAULT 'normal'",
 ];
 
 let applied = false;

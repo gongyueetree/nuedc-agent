@@ -46,6 +46,10 @@ const EXTRACT_SYSTEM = `你从电子设计竞赛赛题原文中提取结构化�
 3. 分不清是基本要求还是发挥部分时，标 uncertain 而不是猜
 4. source_quote 必须是题面里真实存在的原句片段，不得改写或概括 ——
    审核人要靠它逐条比对，写错比留空更糟
+5. 遇到含义不明确的表述（如"相位差"未说明单路还是两路、误差要求缺失、
+   测量对象不明），放进 ambiguities 并给出两种以上具体解释与各自影响。
+   涉及指标数值、误差要求、测量对象的歧义标 critical ——
+   这类不澄清就无法设计，也无法评分。
 
 【输出 JSON】
 {
@@ -59,7 +63,15 @@ const EXTRACT_SYSTEM = `你从电子设计竞赛赛题原文中提取结构化�
   "scoring_items": [
     { "item": "评分项名称", "points": 分值, "section": "设计报告|基本要求|发挥部分|其他" }
   ],
-  "notes": [ { "kind": "说明|限制|器材", "content": "原文内容" } ]
+  "notes": [ { "kind": "说明|限制|器材", "content": "原文内容" } ],
+  "ambiguities": [
+    { "content": "题面中含义不明确的表述（原文引用 + 为何有歧义）",
+      "severity": "critical|normal",
+      "options": [
+        { "key": "A", "text": "一种可能的解释", "implication": "按此解释设计会怎样" },
+        { "key": "B", "text": "另一种解释", "implication": "按此解释设计会怎样" }
+      ] }
+  ]
 }
 
 只输出 JSON，不要任何解释文字。`;
@@ -140,7 +152,13 @@ async function extractOne(t: Target): Promise<{
     requirements: reqs,
     scoringItems: items,
     // saveExtraction 收的是 ambiguities（待澄清项），模型输出的 notes 归入此处
-    ambiguities: Array.isArray(out.notes) ? out.notes : [],
+    // 说明类信息与题面歧义分开：歧义需要人工决策，说明只是补充
+    ambiguities: [
+      ...(Array.isArray(out.ambiguities) ? out.ambiguities : []),
+      ...(Array.isArray(out.notes) ? out.notes.map((n: any) => ({
+        content: typeof n === "string" ? n : n?.content, severity: "normal",
+      })) : []),
+    ].filter((x: any) => x?.content),
   });
 
   return { ok: true, reqs: reqs.length, items: items.length, noScoringSource: !hasScoringText };

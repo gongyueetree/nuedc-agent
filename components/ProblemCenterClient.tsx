@@ -83,6 +83,8 @@ export default function ProblemCenterClient() {
         notes: d.notes || [],
         reviews: d.reviews || [],
         checklist: d.checklist || null,
+        ambiguities: d.ambiguities || [],
+        ambiguityGate: d.ambiguity_gate || null,
       });
 
       const dd = await fetch(`/api/problems/${id}/diffs`).then((r) => r.json()).catch(() => ({ diffs: [] }));
@@ -145,19 +147,46 @@ export default function ProblemCenterClient() {
     else setMsg(r?.error || "提取失败");
   }
 
-  async function confirmAll() {
+  async function confirmAll(force = false) {
     if (!sel) return;
     const n = (sel.requirements || []).filter((r: any) => !["CONFIRMED", "REJECTED"].includes(r.status)).length;
     if (!n) { setMsg("所有需求都已确认或驳回"); return; }
-    if (!confirm(`将 ${n} 条待确认需求一次性标记为已确认？\n\n` +
-      `请先核对数值单位与基本/发挥分类 —— 确认后这些内容会随发布提供给用户。`)) return;
+    if (!force && !confirm(`将 ${n} 条待确认需求一次性标记为已确认？\n\n` +
+      `含解析错误的需求会被自动跳过。请核对数值单位与基本/发挥分类 —— ` +
+      `确认后这些内容会随发布提供给学生。`)) return;
+
     setBusy("确认中…");
-    await fetch(`/api/problems/${sel.problem_id}`, {
+    const res = await fetch(`/api/problems/${sel.problem_id}`, {
       method: "PATCH", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ version_id: sel.version_id, action: "confirm_all" }),
+      body: JSON.stringify({ version_id: sel.version_id, action: "confirm_all", force }),
     });
+    const d = await res.json().catch(() => null);
     setBusy("");
-    setMsg(`已确认 ${n} 条需求`);
+
+    if (res.status === 422 && d?.blocking) {
+      // 逐条列出必须先修正的错误，而不是笼统拒绝
+      const lines = d.blocking.map((b: any) =>
+        `· ${b.requirement_no} ${b.description}\n    ${b.issues.join("；")}`).join("\n");
+      setMsg(`${d.error}：\n${lines}\n\n请逐条修正后再确认；确实无误可选择「忽略校验并确认」。`);
+      return;
+    }
+    if (!res.ok) { setMsg(d?.error || "确认失败"); return; }
+    setMsg(`已确认 ${d?.confirmed ?? n} 条需求` +
+      (d?.skipped ? `，跳过 ${d.skipped} 条存在错误的需求` : ""));
+    openProblem(sel.problem_id);
+  }
+
+  async function decideAmbiguity(noteId: string, decision: any) {
+    if (!sel) return;
+    setBusy("记录决策…");
+    const res = await fetch(`/api/problems/${sel.problem_id}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version_id: sel.version_id, action: "resolve_note", note_id: noteId, decision }),
+    });
+    const d = await res.json().catch(() => null);
+    setBusy("");
+    if (!res.ok) { setMsg(d?.error || "记录失败"); return; }
+    setMsg("已记录决策");
     openProblem(sel.problem_id);
   }
 
@@ -271,7 +300,13 @@ export default function ProblemCenterClient() {
                           {c.detail && <span className="hint">　{c.detail}</span>}
                         </span>
                         {!c.passed && /requirement|需求/.test(c.key + c.label) && (
-                          <button className="btn ghost sm" onClick={confirmAll} disabled={!!busy}>全部确认</button>
+                          <>
+                            <button className="btn ghost sm" onClick={() => confirmAll(false)} disabled={!!busy}>全部确认</button>
+                            <button className="btn ghost sm danger" style={{ marginLeft: 4 }}
+                              title="跳过校验强制确认 —— 仅在人工核对无误时使用"
+                              onClick={() => { if (confirm("忽略校验错误并确认全部需求？\n\n这些错误会传播到方案、BOM、代码与报告。")) confirmAll(true); }}
+                              disabled={!!busy}>忽略校验</button>
+                          </>
                         )}
                         {!c.passed && /ambigu|歧义/.test(c.key + c.label) && (
                           <button className="btn ghost sm" onClick={resolveAllNotes} disabled={!!busy}>全部处理</button>
@@ -316,6 +351,80 @@ export default function ProblemCenterClient() {
                           <button className="btn ghost sm" onClick={() => resolveDiff(d.id, "人工核对无误")}>核对无误</button>
                         </div>
                       ) : <span className="chip green">✓ {d.resolution}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {(sel.ambiguities || []).length > 0 && (
+                <div className="card">
+                  <h3>
+                    题面歧义（{sel.ambiguities.filter((a: any) => !a.resolved).length} 项待决策 / 共 {sel.ambiguities.length} 项）
+                  </h3>
+                  <p className="hint" style={{ margin: "0 0 10px" }}>
+                    标记为「关键」的歧义必须决策后，学生才能采用该题目 ——
+                    题意悬空会一路影响方案、BOM、代码与评分。所有决策会写入报告的
+                    「题意分析与设计假设」章节。
+                  </p>
+
+                  {sel.ambiguities.map((a: any) => (
+                    <div key={a.note_id} className="issue"
+                      style={{ display: "block", marginBottom: 10,
+                        borderLeft: `3px solid ${a.resolved ? "var(--green, #16a34a)" : a.severity === "critical" ? "var(--red, #dc2626)" : "var(--line)"}` }}>
+                      <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                        <span className={"chip " + (a.severity === "critical" ? "red" : "")}>
+                          {a.severity === "critical" ? "关键" : "一般"}
+                        </span>
+                        <span style={{ flex: 1 }}>{a.content}</span>
+                        {a.resolved && <span className="chip green">已决策</span>}
+                      </div>
+
+                      {a.resolved ? (
+                        <p className="hint" style={{ margin: "6px 0 0" }}>
+                          {a.decision?.kind === "adopt_option"
+                            ? `采用解释 ${a.decision.optionKey}：${a.options.find((o: any) => o.key === a.decision.optionKey)?.text || ""}`
+                            : a.decision?.kind === "keep_open"
+                              ? `保持开放，保守假设：${a.decision.note}`
+                              : a.decision?.kind === "ask_advisor"
+                                ? `待指导教师确认：${a.decision.note || ""}`
+                                : a.decision?.note || "已处理"}
+                          {a.decided_by ? `　（${a.decided_by}）` : ""}
+                        </p>
+                      ) : (
+                        <div style={{ marginTop: 8 }}>
+                          {a.options.length > 0 && (
+                            <div style={{ marginBottom: 6 }}>
+                              {a.options.map((o: any) => (
+                                <button key={o.key} className="btn ghost sm" disabled={!!busy}
+                                  style={{ marginRight: 6, marginBottom: 4, textAlign: "left" }}
+                                  title={o.implication || ""}
+                                  onClick={() => decideAmbiguity(a.note_id,
+                                    { kind: "adopt_option", optionKey: o.key })}>
+                                  采用 {o.key}：{String(o.text).slice(0, 40)}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            <button className="btn ghost sm" disabled={!!busy}
+                              onClick={() => {
+                                const note = prompt("按什么理解设计？（会写入报告的设计假设）");
+                                if (note?.trim()) decideAmbiguity(a.note_id, { kind: "custom", note });
+                              }}>自定义解释</button>
+                            <button className="btn ghost sm" disabled={!!busy}
+                              onClick={() => {
+                                const note = prompt(
+                                  "保持开放时按什么保守假设设计？\n\n例如「取两种解释中更严格的一方：按两路相位差实现」");
+                                if (note?.trim()) decideAmbiguity(a.note_id, { kind: "keep_open", note });
+                              }}>保持开放（说明保守假设）</button>
+                            <button className="btn ghost sm" disabled={!!busy}
+                              onClick={() => {
+                                const note = prompt("向指导教师确认什么？（可留待答复后补充结果）") || "";
+                                decideAmbiguity(a.note_id, { kind: "ask_advisor", note });
+                              }}>需询问指导教师</button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
