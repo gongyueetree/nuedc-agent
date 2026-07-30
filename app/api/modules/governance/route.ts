@@ -10,6 +10,10 @@ export async function GET(req: NextRequest) {
   const identity = await getRequestIdentity(req);
   const tier = resolveTier(req);
   if (!["lab", "admin"].includes(tier)) return NextResponse.json({ error: "未授权" }, { status: 401 });
-  const report = await governanceReport(Number(new URL(req.url).searchParams.get("low")) || 60);
+  // 传入身份：org_admin 只统计本组织，平台 admin 看全部
+  const report = await governanceReport(
+    Number(new URL(req.url).searchParams.get("low")) || 60,
+    { viewerRef: identity.owner, orgRef: identity.org ?? null },
+  );
   return NextResponse.json(report);
 }

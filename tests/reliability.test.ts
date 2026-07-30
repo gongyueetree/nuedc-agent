@@ -624,3 +624,20 @@ describe("关键列自愈（不依赖迁移记录）", () => {
     expect(runFn).toContain("表尚未创建时跳过");
   });
 });
+
+describe("治理统计的缺列容错", () => {
+  it("modules 缺 scope 列时降级查询，不让后台 500", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("lib/module-query.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function governanceReport"));
+    expect(fn).toContain('e?.code !== "42703"');
+    expect(fn).toContain("降级为不过滤");
+  });
+
+  it("治理端点传入身份，管理员不会只看到公共模块", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("app/api/modules/governance/route.ts", "utf8");
+    expect(src).toContain("viewerRef: identity.owner");
+    expect(src).toContain("orgRef: identity.org");
+  });
+})

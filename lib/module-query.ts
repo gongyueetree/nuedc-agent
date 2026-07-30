@@ -148,12 +148,23 @@ export async function governanceReport(
   vis?: { viewerRef?: string | null; orgRef?: string | null },
 ): Promise<GovernanceReport> {
   await ensureSchema();
-  // 治理统计同样不得跨组织泄露：org_admin 只应看到本组织数据
+  // 治理统计同样不得跨组织泄露：org_admin 只应看到本组织数据。
+  // 但 modules 表若尚未补上 scope/org_ref 列（迁移被追加过内容的库），
+  // 带条件的查询会整体失败并让后台 500 —— 此时降级为不过滤。
   const v = visibilityClause(vis?.orgRef, vis?.viewerRef);
-  const rs = await db().execute({
-    sql: `SELECT id, data, certification_status, source_type FROM modules WHERE ${v.sql}`,
-    args: v.args,
-  });
+  let rs: { rows: any[] };
+  try {
+    rs = await db().execute({
+      sql: `SELECT id, data, certification_status, source_type FROM modules WHERE ${v.sql}`,
+      args: v.args,
+    });
+  } catch (e: any) {
+    if (e?.code !== "42703") throw e;
+    rs = await db().execute({
+      sql: "SELECT id, data, certification_status, source_type FROM modules",
+      args: [],
+    });
+  }
   const rows = rs.rows.map((r) => ({
     m: JSON.parse(String(r.data)),
     status: String(r.certification_status),
