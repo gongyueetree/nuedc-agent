@@ -21,6 +21,9 @@ const args = Object.fromEntries(
 );
 
 const MODE = args.mode || "report-only";
+/** 环境不满足时以 0 退出并说明原因，而不是让定时任务每天红一次。
+ *  适用于「没有常驻 Worker 就没必要跑端到端压测」这类情况。 */
+const SKIP_IF_UNREADY = args["skip-if-unready"] === "true" || process.env.SKIP_IF_UNREADY === "1";
 const URL_ = args.url || "http://127.0.0.1:3000/api/admin/readiness";
 const OUT = args.out || "";
 const KEY = process.env.ADMIN_API_KEY || "";
@@ -47,7 +50,19 @@ function check(name, ok, detail) {
   return ok;
 }
 
-const data = await fetchReadiness();
+let data;
+try {
+  data = await fetchReadiness();
+} catch (e) {
+  // 服务本身不可达：定时任务模式下跳过，交互模式下报错
+  if (SKIP_IF_UNREADY) {
+    console.log(`⊙ 无法连接就绪检查端点：${String(e?.message || e).slice(0, 120)}`);
+    console.log("  按配置跳过本次压测（非失败）。若服务本该在线，请检查部署状态。");
+    process.exit(0);
+  }
+  console.error(String(e?.message || e));
+  process.exit(1);
+}
 
 if (OUT) {
   mkdirSync(dirname(OUT), { recursive: true });
@@ -106,6 +121,12 @@ if (MODE === "queue-only") {
 
 const failed = results.filter((r) => !r).length;
 if (failed) {
+  if (SKIP_IF_UNREADY) {
+    console.log(`\n⊙ ${failed} 项未就绪，按配置跳过本次压测（非失败）。`);
+    console.log("  这通常意味着当前环境没有部署常驻 Worker，端到端压测无从谈起。");
+    console.log("  需要压测时先部署 Worker，或去掉 --skip-if-unready。");
+    process.exit(0);
+  }
   console.error(`\n❌ ${failed} 项未就绪，终止压测`);
   process.exit(1);
 }

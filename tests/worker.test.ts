@@ -199,3 +199,22 @@ describe("Worker 存活性与就绪检查（heavy 压测依赖）", () => {
     expect(src).toContain("MODE_LABEL");
   });
 });
+
+describe("定时压测的失败噪音控制", () => {
+  it("环境不满足时可跳过而非失败", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("scripts/assert-readiness.mjs", "utf8");
+    expect(src).toContain("SKIP_IF_UNREADY");
+    expect(src).toContain("按配置跳过本次压测（非失败）");
+    // 服务不可达也走同一逻辑，而不是抛栈
+    expect(src).toContain("无法连接就绪检查端点");
+  });
+
+  it("GitHub Actions 升级到不依赖 Node 20 的版本", async () => {
+    const fs = await import("node:fs");
+    for (const f of ["ci.yml", "build-firmware.yml"]) {
+      const src = fs.readFileSync(`.github/workflows/${f}`, "utf8");
+      expect(src, `${f} 仍在用 Node 20 版本的 action`).not.toMatch(/actions\/(checkout|setup-node|upload-artifact)@v4/);
+    }
+  });
+})
