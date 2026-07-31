@@ -104,3 +104,19 @@ describe("P1-2 测试指标分类", () => {
     expect(src).toContain("人工覆盖");
   });
 });
+
+describe("新建项目按钮", () => {
+  it("真正创建项目而不只是清空前端状态", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/Platform.tsx", "utf8");
+    // 原实现只 setProjectId(null)，用户在方案页点击几乎无变化
+    expect(src).toContain("setProjectId(r.project_id)");
+    expect(src).toContain("给新项目起个名字");
+  });
+
+  it("创建失败时明确告知，不静默", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("components/Platform.tsx", "utf8");
+    expect(src).toContain("创建失败");
+  });
+});

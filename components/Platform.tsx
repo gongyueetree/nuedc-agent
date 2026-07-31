@@ -199,13 +199,43 @@ export default function Platform({ embed }: { embed: boolean }) {
     emitToEzplm("stage_changed", { project_id: id, stage: to });
   }
 
-  function resetProject() {
-    setProjectId(null); setStage("PREPARATION"); setProblemText("");
+  /** 清空当前工作区（不落库）。切换项目、创建新项目时复用。 */
+  function clearWorkspace() {
+    setStage("PREPARATION"); setProblemText("");
     setRequirements(null); setSolutions(null); setChosenSolution(null); setBackupSolution(null);
     setWiringReport(null); setBom(null); setCodeBundle(null); setDebugSession(null); setReport(null);
     setTestPlan(null); setTestRecords([]); setTestResult(null); setStaleTypes([]);
     setShortlist([]);
     setMsgs((m) => m.slice(0, 1));
+  }
+
+  /** 新建项目。原先只清空前端状态、不落库 —— 在方案生成页点击时
+   *  界面几乎无变化，用户会以为按钮坏了。改为真正创建并切换过去。 */
+  async function resetProject() {
+    const name = prompt("给新项目起个名字：",
+      `电赛项目 ${new Date().toLocaleDateString("zh-CN")}`);
+    if (name === null) return;   // 取消
+
+    setBusy(true);
+    try {
+      const r = await api("/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ name: name.trim() || "未命名电赛项目" }),
+      });
+      if (r?.error || !r?.project_id) {
+        say("agent", `创建失败：${r?.error || "服务端未返回项目号"}`);
+        return;
+      }
+      clearWorkspace();
+      setProjectId(r.project_id);
+      setPage("solution");
+      await reloadProjects();
+      say("agent", `已创建「${name.trim() || "未命名电赛项目"}」。把赛题粘贴到下方即可开始，或从上方题库选题。`);
+    } catch (e: any) {
+      say("agent", `创建失败：${String(e?.message || e).slice(0, 160)}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   // ============ Agent 动作 ============
