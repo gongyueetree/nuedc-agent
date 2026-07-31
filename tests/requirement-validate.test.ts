@@ -151,6 +151,6 @@ describe("学生端错误表达与测试数据隔离", () => {
   it("非管理员只能看到自己的项目", async () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync("app/api/projects/route.ts", "utf8");
-    expect(src).toContain("WHERE owner=?");
+    expect(src).toMatch(/team_ref=\?|owner=\? AND team_ref IS NULL/);
   });
 });

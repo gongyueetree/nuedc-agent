@@ -2,6 +2,7 @@
 import { useMemo, useState } from "react";
 import { emitToEzplm } from "./api";
 import { StaleBanner } from "./pages-build";
+import { inferMetricKind, judgeRecord, METRIC_SPECS, METRIC_KINDS, type MetricKind } from "../lib/test-metrics";
 
 /* ============ BOM 工作台 ============ */
 const PROC_STATUS = ["待采购", "已下单", "已到货", "库存借用", "自制"] as const;
@@ -262,20 +263,64 @@ export function TestingPage({ ctx }: { ctx: any }) {
                 {p.steps.map((s: string, i: number) => <li key={i}>{s}</li>)}
               </ol>
             )}
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <label className="hint">实测值
-                <input value={rec.measured_value ?? ""} style={{ width: 110, marginLeft: 6, padding: 5, border: "1px solid var(--line)", borderRadius: 6 }}
-                  onChange={(e) => setR(r.id, { measured_value: e.target.value })} placeholder={r.unit || "数值"} />
-              </label>
-              <label className="hint">证据（URL/说明）
-                <input value={(rec.evidence || [])[0] ?? ""} style={{ width: 200, marginLeft: 6, padding: 5, border: "1px solid var(--line)", borderRadius: 6 }}
-                  onChange={(e) => setR(r.id, { evidence: e.target.value ? [e.target.value] : [] })} placeholder="波形截图/CSV 链接" />
-              </label>
-              <span className="hint">人工判定：</span>
-              <button className={"btn sm" + (rec.pass_override === true ? " ok" : " ghost")} onClick={() => setR(r.id, { pass_override: rec.pass_override === true ? null : true })}>通过</button>
-              <button className={"btn ghost sm" + (rec.pass_override === false ? " danger" : "")} onClick={() => setR(r.id, { pass_override: rec.pass_override === false ? null : false })}>不通过</button>
-              {v && <span className="hint" style={{ marginLeft: "auto" }}>{v.detail}</span>}
-            </div>
+            {/* 按指标类型给出对应的录入项 —— 学生测试指出所有需求
+                用同一种方式录入，不知道该填什么（P1-2） */}
+            {(() => {
+              const kind = rec.metric_kind || inferMetricKind(r);
+              const spec = METRIC_SPECS[kind as MetricKind];
+              const judged = judgeRecord(kind as MetricKind, r, rec);
+              return (
+                <>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+                    <select value={kind} onChange={(e) => setR(r.id, { metric_kind: e.target.value })}
+                      style={{ padding: "4px 8px", border: "1px solid var(--line)", borderRadius: 6, fontSize: 12 }}>
+                      {METRIC_KINDS.map((k) => (
+                        <option key={k} value={k}>{METRIC_SPECS[k].label}</option>
+                      ))}
+                    </select>
+                    <span className="hint">判据：{spec.judge}</span>
+                  </div>
+                  {spec.tip && <p className="hint" style={{ margin: "0 0 6px", color: "var(--amber, #b45309)" }}>💡 {spec.tip}</p>}
+
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    {spec.inputs.map((f) => (
+                      f.type === "bool" ? (
+                        <span key={f.key} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                          <span className="hint">{f.label}：</span>
+                          <button className={"btn sm" + (rec[f.key] === true ? " ok" : " ghost")}
+                            onClick={() => setR(r.id, { [f.key]: rec[f.key] === true ? null : true })}>是</button>
+                          <button className={"btn ghost sm" + (rec[f.key] === false ? " danger" : "")}
+                            onClick={() => setR(r.id, { [f.key]: rec[f.key] === false ? null : false })}>否</button>
+                        </span>
+                      ) : (
+                        <label key={f.key} className="hint" title={f.hint || ""}>
+                          {f.label}
+                          <input value={String(rec[f.key] ?? "")} placeholder={f.hint || ""}
+                            style={{ width: f.type === "number" ? 110 : 190, marginLeft: 6, padding: 5,
+                              border: "1px solid var(--line)", borderRadius: 6 }}
+                            onChange={(e) => setR(r.id, { [f.key]: e.target.value })} />
+                        </label>
+                      )
+                    ))}
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6 }}>
+                    {/* 程序按类型自动判定，人工可覆盖 */}
+                    <span className="hint">
+                      自动判定：{judged.pass === null ? "待补充" : judged.pass ? "通过" : "不通过"}
+                      　{judged.reason}
+                    </span>
+                    <span style={{ flex: 1 }} />
+                    <span className="hint">人工覆盖：</span>
+                    <button className={"btn sm" + (rec.pass_override === true ? " ok" : " ghost")}
+                      onClick={() => setR(r.id, { pass_override: rec.pass_override === true ? null : true })}>通过</button>
+                    <button className={"btn ghost sm" + (rec.pass_override === false ? " danger" : "")}
+                      onClick={() => setR(r.id, { pass_override: rec.pass_override === false ? null : false })}>不通过</button>
+                  </div>
+                  {v && <p className="hint" style={{ margin: "6px 0 0" }}>{v.detail}</p>}
+                </>
+              );
+            })()}
           </div>
         );
       })}

@@ -581,6 +581,15 @@ ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS severity TEXT DEFAULT 'normal
 CREATE INDEX IF NOT EXISTS idx_pnote_decision ON problem_notes(version_id, kind, resolved);
 `,
   },
+  {
+    id: 23,
+    name: "team_scope",
+    sql: `
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS team_ref TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS created_by_name TEXT;
+CREATE INDEX IF NOT EXISTS idx_projects_team ON projects(team_ref, updated_at DESC);
+`,
+  },
 ];
 
 /** 关键列的幂等补丁。任何因「已发布迁移被追加内容」而可能缺失的列都列在这里，
@@ -610,6 +619,8 @@ const CRITICAL_COLUMNS = [
   "ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS decided_by TEXT",
   "ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ",
   "ALTER TABLE problem_notes ADD COLUMN IF NOT EXISTS severity TEXT DEFAULT 'normal'",
+  "ALTER TABLE projects ADD COLUMN IF NOT EXISTS team_ref TEXT",
+  "ALTER TABLE projects ADD COLUMN IF NOT EXISTS created_by_name TEXT",
 ];
 
 let applied = false;

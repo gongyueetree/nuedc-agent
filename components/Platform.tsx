@@ -73,7 +73,27 @@ export default function Platform({ embed }: { embed: boolean }) {
   const [testRecords, setTestRecords] = useState<any[]>([]);
   const [testResult, setTestResult] = useState<any>(null);           // verdicts + summary
   const [staleTypes, setStaleTypes] = useState<string[]>([]);        // 方案变更后过期的产物类型
-  const [sysMode, setSysMode] = useState<any>(null);                 // 系统模式与排队情况
+  const [sysMode, setSysMode] = useState<any>(null);
+  // 队伍状态：同队共享项目，未加入时只看本设备（学生测试 P0-4）
+  const [team, setTeam] = useState<{ joined: boolean; code: string | null; member: string | null }>(
+    { joined: false, code: null, member: null });
+  useEffect(() => {
+    fetch("/api/team").then((r) => r.json()).then(setTeam).catch(() => {});
+  }, []);
+
+  async function teamAction(action: string, code?: string, member?: string) {
+    const r = await fetch("/api/team", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action, code, member }),
+    }).then((x) => x.json()).catch(() => null);
+    if (r?.error) { alert(r.error); return; }
+    if (action === "create" && r?.code) {
+      alert(`队伍已创建，队伍码：${r.code}\n\n${r.hint || ""}`);
+    }
+    const t = await fetch("/api/team").then((x) => x.json()).catch(() => null);
+    if (t) setTeam(t);
+    reloadProjects();
+  }                 // 系统模式与排队情况
   const [progress, setProgress] = useState<any>(null);               // 当前任务排队位置
   const [shortlist, setShortlist] = useState<string[]>([]); // 电赛模块页「选用」的备选模块
 
@@ -591,6 +611,22 @@ export default function Platform({ embed }: { embed: boolean }) {
             {projects.map((p) => <option key={p.project_id} value={p.project_id}>{p.name}</option>)}
           </select>
           <span className="stagepill">{STAGE_LABEL[stage] || stage}</span>
+          <button className="btn ghost sm" title={team.joined ? `队伍 ${team.code}：队内成员共享项目` : "创建或加入队伍后，队友可看到同一批项目"}
+            onClick={() => {
+              if (team.joined) {
+                if (confirm(`当前队伍：${team.code}\n\n把这个码发给队友即可共享项目。\n\n要退出队伍吗？（退出后只看本设备的项目）`)) {
+                  teamAction("leave");
+                }
+                return;
+              }
+              const code = prompt("输入队友给你的队伍码；留空则新建一支队伍：");
+              if (code === null) return;
+              const member = prompt("你的名字（可留空，用于让队友知道项目是谁建的）：") || "";
+              if (code.trim()) teamAction("join", code.trim(), member);
+              else teamAction("create", undefined, member);
+            }}>
+            {team.joined ? `👥 ${team.code}` : "👥 队伍"}
+          </button>
           <button className={"btn ghost sm" + (page === "modules" ? " on" : "")}
             onClick={() => setPage("modules")} title="浏览电赛模块库，可随时选用到当前方案">🔲 电赛模块</button>
           <button className={"btn ghost sm" + (page === "projects" ? " on" : "")}
