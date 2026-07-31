@@ -17,8 +17,8 @@ on:
         description: "mock-provider 用户数（手工触发可上调到 300）"
         required: false
         default: "300"
-  schedule:
-    - cron: "0 18 * * *"
+  #schedule:
+  #  - cron: "0 18 * * *"
 
 permissions:
   contents: read
